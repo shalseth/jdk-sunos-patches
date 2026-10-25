@@ -14,3 +14,4 @@
 -p1 jdk19u-jdk-19.0.2-ga/sparc-stringopts.patch
 -p1 jdk19u-jdk-19.0.2-ga/sparc-make-walkable.patch
 -p1 jdk19u-jdk-19.0.2-ga/sparc-loom-stubs.patch
+-p1 jdk19u-jdk-19.0.2-ga/sparc-19u.patch
