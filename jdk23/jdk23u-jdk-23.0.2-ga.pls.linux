@@ -1,0 +1,8 @@
+-p1 jdk23u-jdk-23.0.2-ga/restore_os_cpu_linux_sparc.patch
+-p1 jdk23u-jdk-23.0.2-ga/linux-sparc-1.patch
+-p1 jdk23u-jdk-23.0.2-ga/8354941-uabs.patch
+-p1 jdk23u-jdk-23.0.2-ga/linux-sparc-19u.patch
+-p1 jdk23u-jdk-23.0.2-ga/linux-sparc-20.patch
+-p1 jdk23u-jdk-23.0.2-ga/linux-sparc-21.patch
+-p1 jdk23u-jdk-23.0.2-ga/linux-sparc-22.patch
+-p1 jdk23u-jdk-23.0.2-ga/linux-sparc-23.patch

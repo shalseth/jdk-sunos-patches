@@ -1,0 +1,22 @@
+diff --git a/src/hotspot/cpu/sparc/nativeInst_sparc.cpp b/src/hotspot/cpu/sparc/nativeInst_sparc.cpp
+index 94edfed8f..b7130cd54 100644
+--- a/src/hotspot/cpu/sparc/nativeInst_sparc.cpp
++++ b/src/hotspot/cpu/sparc/nativeInst_sparc.cpp
+@@ -798,11 +798,14 @@ void NativeJump::patch_verified_entry(address entry, address verified_entry, add
+ 
+   // %%%%% For now, do something MT-stupid:
+   ResourceMark rm;
+-  int code_size = 1 * BytesPerInstWord;
+-  CodeBuffer cb(verified_entry, code_size + 1);
++  int insn[2];
++  CodeBuffer cb((address)insn, sizeof(insn));
+   MacroAssembler* a = new MacroAssembler(&cb);
+   a->ldsw(G0, 0, O7); // "ld" must agree with code in the signal handler
+-  ICache::invalidate_range(verified_entry, code_size);
++  // Other threads may be executing this instruction: the CodeBuffer emits
++  // byte by byte, so patch with a single aligned word store.
++  *(volatile int*)verified_entry = insn[0];
++  ICache::invalidate_word(verified_entry);
+ }
+ 
+ 

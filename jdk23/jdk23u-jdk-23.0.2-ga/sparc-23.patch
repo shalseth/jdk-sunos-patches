@@ -1,0 +1,2483 @@
+diff --git a/src/hotspot/cpu/sparc/c1_LIRAssembler_sparc.cpp b/src/hotspot/cpu/sparc/c1_LIRAssembler_sparc.cpp
+index 496e0d2b6..c220d0afa 100644
+--- a/src/hotspot/cpu/sparc/c1_LIRAssembler_sparc.cpp
++++ b/src/hotspot/cpu/sparc/c1_LIRAssembler_sparc.cpp
+@@ -167,9 +167,7 @@ int LIR_Assembler::initial_frame_size_in_bytes() const {
+ // we fetch the class of the receiver (O0) and compare it with the cached class.
+ // If they do not match we jump to slow case.
+ int LIR_Assembler::check_icache() {
+-  int offset = __ offset();
+-  __ inline_cache_check(O0, G5_inline_cache_reg);
+-  return offset;
++  return __ ic_check(CodeEntryAlignment);
+ }
+ 
+ void LIR_Assembler::clinit_barrier(ciMethod* method) {
+@@ -2279,7 +2277,7 @@ void LIR_Assembler::emit_alloc_array(LIR_OpAllocArray* op) {
+                       op->tmp1()->as_register(),
+                       op->tmp2()->as_register(),
+                       op->tmp3()->as_register(),
+-                      arrayOopDesc::header_size(op->type()),
++                      arrayOopDesc::base_offset_in_bytes(op->type()),
+                       type2aelembytes(op->type()),
+                       op->klass()->as_register(),
+                       *op->stub()->entry());
+diff --git a/src/hotspot/cpu/sparc/c1_MacroAssembler_sparc.cpp b/src/hotspot/cpu/sparc/c1_MacroAssembler_sparc.cpp
+index c33604403..5cfb4d01e 100644
+--- a/src/hotspot/cpu/sparc/c1_MacroAssembler_sparc.cpp
++++ b/src/hotspot/cpu/sparc/c1_MacroAssembler_sparc.cpp
+@@ -36,21 +36,6 @@
+ #include "runtime/sharedRuntime.hpp"
+ #include "runtime/stubRoutines.hpp"
+ 
+-void C1_MacroAssembler::inline_cache_check(Register receiver, Register iCache) {
+-  Label L;
+-  const Register temp_reg = G3_scratch;
+-  // Note: needs more testing of out-of-line vs. inline slow case
+-  verify_oop(receiver);
+-  load_klass(receiver, temp_reg);
+-  cmp_and_brx_short(temp_reg, iCache, Assembler::equal, Assembler::pt, L);
+-  AddressLiteral ic_miss(SharedRuntime::get_ic_miss_stub());
+-  jump_to(ic_miss, temp_reg);
+-  delayed()->nop();
+-  align(CodeEntryAlignment);
+-  bind(L);
+-}
+-
+-
+ void C1_MacroAssembler::explicit_null_check(Register base) {
+   Unimplemented();
+ }
+@@ -146,7 +131,7 @@ void C1_MacroAssembler::try_allocate(
+   Register obj,                        // result: pointer to object after successful allocation
+   Register var_size_in_bytes,          // object size in bytes if unknown at compile time; invalid otherwise
+   int      con_size_in_bytes,          // object size in bytes if   known at compile time
+-  Register t1,                         // temp register, must be global register for incr_allocated_bytes
++  Register t1,                         // temp register
+   Register t2,                         // temp register
+   Label&   slow_case                   // continuation point if fast allocation fails
+ ) {
+@@ -280,7 +265,7 @@ void C1_MacroAssembler::allocate_array(
+   Register t1,                         // temp register
+   Register t2,                         // temp register
+   Register t3,                         // temp register
+-  int      hdr_size,                   // object header size in words
++  int      base_offset_in_bytes,       // elements offset in bytes
+   int      elt_size,                   // element size in bytes
+   Register klass,                      // object klass
+   Label&   slow_case                   // continuation point if fast allocation fails
+@@ -314,7 +299,7 @@ void C1_MacroAssembler::allocate_array(
+     case  8: delayed()->sll(len, 3, arr_size); break;
+     default: ShouldNotReachHere();
+   }
+-  add(arr_size, hdr_size * wordSize + MinObjAlignmentInBytesMask, arr_size); // add space for header & alignment
++  add(arr_size, base_offset_in_bytes + MinObjAlignmentInBytesMask, arr_size); // add space for header & alignment
+   and3(arr_size, ~MinObjAlignmentInBytesMask, arr_size);                     // align array size
+ 
+   // allocate space & initialize header
+@@ -324,8 +309,17 @@ void C1_MacroAssembler::allocate_array(
+   // initialize body
+   const Register base  = t2;
+   const Register index = t3;
+-  add(obj, hdr_size * wordSize, base);               // compute address of first element
+-  sub(arr_size, hdr_size * wordSize, index);         // compute index = number of words to clear
++  add(obj, base_offset_in_bytes, base);              // compute address of first element
++  sub(arr_size, base_offset_in_bytes, index);        // compute index = number of bytes to clear
++
++  // Zero first 4 bytes, if start offset is not word aligned.
++  if (!is_aligned(base_offset_in_bytes, BytesPerWord)) {
++    assert(is_aligned(base_offset_in_bytes, BytesPerInt), "must be 4-byte aligned");
++    stw(G0, base, 0);
++    add(base, BytesPerInt, base);
++    sub(index, BytesPerInt, index);
++  }
++
+   initialize_body(base, index);
+ 
+   if (CURRENT_ENV->dtrace_alloc_probes()) {
+diff --git a/src/hotspot/cpu/sparc/c1_MacroAssembler_sparc.hpp b/src/hotspot/cpu/sparc/c1_MacroAssembler_sparc.hpp
+index 532ef0261..2c1caa2c5 100644
+--- a/src/hotspot/cpu/sparc/c1_MacroAssembler_sparc.hpp
++++ b/src/hotspot/cpu/sparc/c1_MacroAssembler_sparc.hpp
+@@ -79,7 +79,7 @@
+     Register t1,                       // temp register
+     Register t2,                       // temp register
+     Register t3,                       // temp register
+-    int      hdr_size,                 // object header size in words
++    int      base_offset_in_bytes,     // elements offset in bytes
+     int      elt_size,                 // element size in bytes
+     Register klass,                    // object klass
+     Label&   slow_case                 // continuation point if fast allocation fails
+diff --git a/src/hotspot/cpu/sparc/c1_Runtime1_sparc.cpp b/src/hotspot/cpu/sparc/c1_Runtime1_sparc.cpp
+index 8dd9a0f5d..8b6427961 100644
+--- a/src/hotspot/cpu/sparc/c1_Runtime1_sparc.cpp
++++ b/src/hotspot/cpu/sparc/c1_Runtime1_sparc.cpp
+@@ -34,7 +34,6 @@
+ #include "interpreter/interpreter.hpp"
+ #include "memory/universe.hpp"
+ #include "nativeInst_sparc.hpp"
+-#include "oops/compiledICHolder.hpp"
+ #include "oops/oop.inline.hpp"
+ #include "prims/jvmtiExport.hpp"
+ #include "runtime/sharedRuntime.hpp"
+diff --git a/src/hotspot/cpu/sparc/compiledIC_sparc.cpp b/src/hotspot/cpu/sparc/compiledIC_sparc.cpp
+index 9da17d1e1..7259306ab 100644
+--- a/src/hotspot/cpu/sparc/compiledIC_sparc.cpp
++++ b/src/hotspot/cpu/sparc/compiledIC_sparc.cpp
+@@ -25,7 +25,6 @@
+ #include "precompiled.hpp"
+ #include "asm/macroAssembler.inline.hpp"
+ #include "code/compiledIC.hpp"
+-#include "code/icBuffer.hpp"
+ #include "code/nmethod.hpp"
+ #include "memory/resourceArea.hpp"
+ #include "runtime/mutexLocker.hpp"
+@@ -36,19 +35,17 @@
+ 
+ // ----------------------------------------------------------------------------
+ 
+-#define __ _masm.
+-address CompiledStaticCall::emit_to_interp_stub(CodeBuffer &cbuf, address mark) {
++#define __ masm->
++address CompiledDirectCall::emit_to_interp_stub(MacroAssembler *masm, address mark) {
+   // Stub is fixed up when the corresponding call is converted from calling
+   // compiled code to calling interpreted code.
+   // set (empty), G5
+   // jmp -1
+ 
+   if (mark == NULL) {
+-    mark = cbuf.insts_mark();  // Get mark within main instrs section.
++    mark = __ inst_mark();  // Get mark within main instrs section.
+   }
+ 
+-  MacroAssembler _masm(&cbuf);
+-
+   address base = __ start_a_stub(to_interp_stub_size());
+   if (base == NULL) {
+     return NULL;  // CodeBuffer::expand failed.
+@@ -73,12 +70,12 @@ address CompiledStaticCall::emit_to_interp_stub(CodeBuffer &cbuf, address mark)
+ }
+ #undef __
+ 
+-int CompiledStaticCall::to_trampoline_stub_size() {
++int CompiledDirectCall::to_trampoline_stub_size() {
+   // SPARC doesn't use trampolines.
+   return 0;
+ }
+ 
+-int CompiledStaticCall::to_interp_stub_size() {
++int CompiledDirectCall::to_interp_stub_size() {
+   // This doesn't need to be accurate but it must be larger or equal to
+   // the real size of the stub.
+   return (NativeMovConstReg::instruction_size +  // sethi/setlo;
+@@ -86,21 +83,14 @@ int CompiledStaticCall::to_interp_stub_size() {
+ }
+ 
+ // Relocation entries for call stub, compiled java to interpreter.
+-int CompiledStaticCall::reloc_to_interp_stub() {
++int CompiledDirectCall::reloc_to_interp_stub() {
+   return 10;  // 4 in emit_java_to_interp + 1 in Java_Static_Call
+ }
+ 
+-void CompiledDirectStaticCall::set_to_interpreted(const methodHandle& callee, address entry) {
++void CompiledDirectCall::set_to_interpreted(const methodHandle& callee, address entry) {
+   address stub = find_stub();
+   guarantee(stub != NULL, "stub not found");
+ 
+-  if (TraceICs) {
+-    ResourceMark rm;
+-    tty->print_cr("CompiledDirectStaticCall@" INTPTR_FORMAT ": set_to_interpreted %s",
+-                  p2i(instruction_address()),
+-                  callee->name_and_sig_as_C_string());
+-  }
+-
+   // Creation also verifies the object.
+   NativeMovConstReg* method_holder = nativeMovConstReg_at(stub);
+   NativeJump*        jump          = nativeJump_at(method_holder->next_instruction_address());
+@@ -114,7 +104,7 @@ void CompiledDirectStaticCall::set_to_interpreted(const methodHandle& callee, ad
+   set_destination_mt_safe(stub);
+ }
+ 
+-void CompiledDirectStaticCall::set_stub_to_clean(static_stub_Relocation* static_stub) {
++void CompiledDirectCall::set_stub_to_clean(static_stub_Relocation* static_stub) {
+   // Reset stub.
+   address stub = static_stub->addr();
+   assert(stub != NULL, "stub not found");
+@@ -130,7 +120,7 @@ void CompiledDirectStaticCall::set_stub_to_clean(static_stub_Relocation* static_
+ // Non-product mode code
+ #ifndef PRODUCT
+ 
+-void CompiledDirectStaticCall::verify() {
++void CompiledDirectCall::verify() {
+   // Verify call.
+   _call->verify();
+   _call->verify_alignment();
+diff --git a/src/hotspot/cpu/sparc/frame_sparc.cpp b/src/hotspot/cpu/sparc/frame_sparc.cpp
+index eb8a6c36d..d3a4f4824 100644
+--- a/src/hotspot/cpu/sparc/frame_sparc.cpp
++++ b/src/hotspot/cpu/sparc/frame_sparc.cpp
+@@ -207,7 +207,7 @@ bool frame::safe_for_sender(JavaThread *thread) {
+     // ok. adapter blobs never have a frame complete and are never ok.
+ 
+     if (!_cb->is_frame_complete_at(_pc)) {
+-      if (_cb->is_compiled() || _cb->is_adapter_blob() || _cb->is_runtime_stub()) {
++      if (_cb->is_nmethod() || _cb->is_adapter_blob() || _cb->is_runtime_stub()) {
+         return false;
+       }
+     }
+@@ -276,7 +276,7 @@ bool frame::safe_for_sender(JavaThread *thread) {
+     // because you must allocate window space
+ 
+     if (sender_blob->frame_size() <= 0) {
+-      assert(!sender_blob->is_compiled(), "should count return address at least");
++      assert(!sender_blob->is_nmethod(), "should count return address at least");
+       return false;
+     }
+ 
+@@ -287,7 +287,7 @@ bool frame::safe_for_sender(JavaThread *thread) {
+     // the stack unwalkable. pd_get_top_frame_for_signal_handler tries to recover from this by unwinding
+     // that initial frame and retrying.
+ 
+-    if (!sender_blob->is_compiled()) {
++    if (!sender_blob->is_nmethod()) {
+       return false;
+     }
+ 
+@@ -365,7 +365,7 @@ frame::frame(intptr_t* sp, intptr_t* younger_sp, bool younger_frame_is_interpret
+ 
+   // Check for MethodHandle call sites.
+   if (_cb != NULL) {
+-    CompiledMethod* nm = _cb->as_compiled_method_or_null();
++    nmethod* nm = _cb->as_nmethod_or_null();
+     if (nm != NULL) {
+       if (nm->is_deopt_mh_entry(_pc) || nm->is_method_handle_return(_pc)) {
+         _sp_adjustment_by_callee = (intptr_t*) ((intptr_t) sp[L7_mh_SP_save->sp_offset_in_saved_window()] + STACK_BIAS) - sp;
+@@ -385,7 +385,7 @@ frame::frame(intptr_t* sp, intptr_t* younger_sp, bool younger_frame_is_interpret
+   // this lookup as get_deopt_original_pc() needs a correct value for
+   // unextended_sp() which uses _sp_adjustment_by_callee.
+   if (_pc != NULL) {
+-    address original_pc = CompiledMethod::get_deopt_original_pc(this);
++    address original_pc = get_deopt_original_pc();
+     if (original_pc != NULL) {
+       _pc = original_pc;
+       _deopt_state = is_deoptimized;
+@@ -474,7 +474,7 @@ void frame::patch_pc(Thread* thread, address pc) {
+                   p2i(O7_addr()), p2i(_pc), p2i(pc));
+   }
+   *O7_addr() = pc - pc_return_offset;
+-  address original_pc = CompiledMethod::get_deopt_original_pc(this);
++  address original_pc = get_deopt_original_pc();
+   if (original_pc != NULL) {
+     assert(original_pc == _pc, "expected original to be stored before patching");
+     _deopt_state = is_deoptimized;
+diff --git a/src/hotspot/cpu/sparc/frame_sparc.hpp b/src/hotspot/cpu/sparc/frame_sparc.hpp
+index bfb473fd6..fed65a0d0 100644
+--- a/src/hotspot/cpu/sparc/frame_sparc.hpp
++++ b/src/hotspot/cpu/sparc/frame_sparc.hpp
+@@ -161,7 +161,6 @@
+ 
+   void init(intptr_t* sp, address pc, CodeBlob* cb);
+ 
+-  const ImmutableOopMap* get_oop_map() const;
+ 
+   // Walk from sp outward looking for old_sp, and return old_sp's predecessor
+   // (i.e. return the sp from the frame where old_sp is the fp).
+diff --git a/src/hotspot/cpu/sparc/frame_sparc.inline.hpp b/src/hotspot/cpu/sparc/frame_sparc.inline.hpp
+index baafc0b32..b3c7dd4e3 100644
+--- a/src/hotspot/cpu/sparc/frame_sparc.inline.hpp
++++ b/src/hotspot/cpu/sparc/frame_sparc.inline.hpp
+@@ -195,20 +195,6 @@ inline void frame::set_saved_oop_result(RegisterMap* map, oop obj) {
+   *((oop*) map->location(O0->as_VMReg(), nullptr)) = obj;
+ }
+ 
+-inline const ImmutableOopMap* frame::get_oop_map() const {
+-  if (_cb == NULL) return NULL;
+-  if (_cb->oop_maps() != NULL) {
+-    NativePostCallNop* nop = nativePostCallNop_at(_pc);
+-    if (nop != NULL && nop->displacement() != 0) {
+-      int slot = ((nop->displacement() >> 24) & 0xff);
+-      return _cb->oop_map_for_slot(slot, _pc);
+-    }
+-    const ImmutableOopMap* oop_map = OopMapSet::find_map(this);
+-    return oop_map;
+-  }
+-  return NULL;
+-}
+-
+ inline int frame::compiled_frame_stack_argsize() const {
+   Unimplemented();
+   return 0;
+diff --git a/src/hotspot/cpu/sparc/gc/g1/g1BarrierSetAssembler_sparc.cpp b/src/hotspot/cpu/sparc/gc/g1/g1BarrierSetAssembler_sparc.cpp
+index 1670caaac..c0c0d39bc 100644
+--- a/src/hotspot/cpu/sparc/gc/g1/g1BarrierSetAssembler_sparc.cpp
++++ b/src/hotspot/cpu/sparc/gc/g1/g1BarrierSetAssembler_sparc.cpp
+@@ -31,7 +31,7 @@
+ #include "gc/g1/g1DirtyCardQueue.hpp"
+ #include "gc/g1/g1SATBMarkQueueSet.hpp"
+ #include "gc/g1/g1ThreadLocalData.hpp"
+-#include "gc/g1/heapRegion.hpp"
++#include "gc/g1/g1HeapRegion.hpp"
+ #include "interpreter/interp_masm.hpp"
+ #include "runtime/sharedRuntime.hpp"
+ #include "utilities/macros.hpp"
+@@ -372,7 +372,7 @@ void G1BarrierSetAssembler::g1_write_barrier_post(MacroAssembler* masm, Register
+   G1BarrierSet* bs = barrier_set_cast<G1BarrierSet>(BarrierSet::barrier_set());
+ 
+   __ xor3(store_addr, new_val, tmp);
+-  __ srlx(tmp, HeapRegion::LogOfHRGrainBytes, tmp);
++  __ srlx(tmp, G1HeapRegion::LogOfHRGrainBytes, tmp);
+ 
+   __ cmp_and_brx_short(tmp, G0, Assembler::equal, Assembler::pt, filtered);
+ 
+diff --git a/src/hotspot/cpu/sparc/gc/shared/barrierSetAssembler_sparc.cpp b/src/hotspot/cpu/sparc/gc/shared/barrierSetAssembler_sparc.cpp
+index ed4939dd0..ef217ab33 100644
+--- a/src/hotspot/cpu/sparc/gc/shared/barrierSetAssembler_sparc.cpp
++++ b/src/hotspot/cpu/sparc/gc/shared/barrierSetAssembler_sparc.cpp
+@@ -106,3 +106,11 @@ void BarrierSetAssembler::try_resolve_jobject_in_native(MacroAssembler* masm, Re
+   __ andn(obj, JNIHandles::tag_mask, obj);
+   __ ld_ptr(obj, 0, obj);
+ }
++
++#ifdef COMPILER2
++
++OptoReg::Name BarrierSetAssembler::refine_register(const Node* node, OptoReg::Name opto_reg) {
++  Unimplemented(); // This must be implemented to support late barrier expansion.
++}
++
++#endif // COMPILER2
+diff --git a/src/hotspot/cpu/sparc/gc/shared/barrierSetAssembler_sparc.hpp b/src/hotspot/cpu/sparc/gc/shared/barrierSetAssembler_sparc.hpp
+index 0e91b042e..26708e6a1 100644
+--- a/src/hotspot/cpu/sparc/gc/shared/barrierSetAssembler_sparc.hpp
++++ b/src/hotspot/cpu/sparc/gc/shared/barrierSetAssembler_sparc.hpp
+@@ -28,6 +28,12 @@
+ #include "asm/macroAssembler.hpp"
+ #include "memory/allocation.hpp"
+ #include "oops/access.hpp"
++#ifdef COMPILER2
++#include "code/vmreg.hpp"
++#include "opto/optoreg.hpp"
++
++class Node;
++#endif // COMPILER2
+ 
+ class InterpreterMacroAssembler;
+ 
+@@ -49,6 +55,11 @@ class BarrierSetAssembler: public CHeapObj<mtGC> {
+                                              Register obj, Register tmp, Label& slowpath);
+ 
+   virtual void barrier_stubs_init() {}
++
++#ifdef COMPILER2
++  OptoReg::Name refine_register(const Node* node,
++                                OptoReg::Name opto_reg);
++#endif // COMPILER2
+ };
+ 
+ #endif // CPU_SPARC_GC_SHARED_BARRIERSETASSEMBLER_SPARC_HPP
+diff --git a/src/hotspot/cpu/sparc/globalDefinitions_sparc.hpp b/src/hotspot/cpu/sparc/globalDefinitions_sparc.hpp
+index 302078e64..04198e24e 100644
+--- a/src/hotspot/cpu/sparc/globalDefinitions_sparc.hpp
++++ b/src/hotspot/cpu/sparc/globalDefinitions_sparc.hpp
+@@ -57,6 +57,9 @@ const bool CCallingConventionRequiresIntsAsLongs = true;
+   #define OM_CACHE_LINE_SIZE 64
+ #endif
+ 
++// The default padding size for data structures to avoid false sharing.
++#define DEFAULT_PADDING_SIZE DEFAULT_CACHE_LINE_SIZE
++
+ #if defined(SOLARIS)
+ #define SUPPORT_RESERVED_STACK_AREA
+ #endif
+diff --git a/src/hotspot/cpu/sparc/globals_sparc.hpp b/src/hotspot/cpu/sparc/globals_sparc.hpp
+index b5194a2d7..2a0b7bf58 100644
+--- a/src/hotspot/cpu/sparc/globals_sparc.hpp
++++ b/src/hotspot/cpu/sparc/globals_sparc.hpp
+@@ -85,7 +85,6 @@ define_pd_global(bool, VMContinuations, false);
+ 
+ #define ARCH_FLAGS(develop, \
+                    product, \
+-                   notproduct, \
+                    range, \
+                    constraint) \
+                                                                             \
+diff --git a/src/hotspot/cpu/sparc/icBuffer_sparc.cpp b/src/hotspot/cpu/sparc/icBuffer_sparc.cpp
+deleted file mode 100644
+index 5b3845144..000000000
+--- a/src/hotspot/cpu/sparc/icBuffer_sparc.cpp
++++ /dev/null
+@@ -1,72 +0,0 @@
+-/*
+- * Copyright (c) 1997, 2017, Oracle and/or its affiliates. All rights reserved.
+- * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+- *
+- * This code is free software; you can redistribute it and/or modify it
+- * under the terms of the GNU General Public License version 2 only, as
+- * published by the Free Software Foundation.
+- *
+- * This code is distributed in the hope that it will be useful, but WITHOUT
+- * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+- * FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+- * version 2 for more details (a copy is included in the LICENSE file that
+- * accompanied this code).
+- *
+- * You should have received a copy of the GNU General Public License version
+- * 2 along with this work; if not, write to the Free Software Foundation,
+- * Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301 USA.
+- *
+- * Please contact Oracle, 500 Oracle Parkway, Redwood Shores, CA 94065 USA
+- * or visit www.oracle.com if you need additional information or have any
+- * questions.
+- *
+- */
+-
+-#include "precompiled.hpp"
+-#include "asm/macroAssembler.inline.hpp"
+-#include "code/icBuffer.hpp"
+-#include "gc/shared/collectedHeap.inline.hpp"
+-#include "interpreter/bytecodes.hpp"
+-#include "memory/resourceArea.hpp"
+-#include "nativeInst_sparc.hpp"
+-#include "oops/oop.inline.hpp"
+-
+-int InlineCacheBuffer::ic_stub_code_size() {
+-  return (NativeMovConstReg::instruction_size +  // sethi;add
+-          NativeJump::instruction_size +          // sethi; jmp; delay slot
+-          (1*BytesPerInstWord) + 1);            // flush + 1 extra byte
+-}
+-
+-void InlineCacheBuffer::assemble_ic_buffer_code(address code_begin, void* cached_value, address entry_point) {
+-  ResourceMark rm;
+-  CodeBuffer     code(code_begin, ic_stub_code_size());
+-  MacroAssembler* masm            = new MacroAssembler(&code);
+-  // note: even though the code contains an embedded metadata, we do not need reloc info
+-  // because
+-  // (1) the metadata is old (i.e., doesn't matter for scavenges)
+-  // (2) these ICStubs are removed *before* a GC happens, so the roots disappear
+-  AddressLiteral cached_value_addrlit((address)cached_value, relocInfo::none);
+-  // Force the set to generate the fixed sequence so next_instruction_address works
+-  masm->patchable_set(cached_value_addrlit, G5_inline_cache_reg);
+-  assert(G3_scratch != G5_method, "Do not clobber the method oop in the transition stub");
+-  assert(G3_scratch != G5_inline_cache_reg, "Do not clobber the inline cache register in the transition stub");
+-  AddressLiteral entry(entry_point);
+-  masm->JUMP(entry, G3_scratch, 0);
+-  masm->delayed()->nop();
+-  masm->flush();
+-}
+-
+-
+-address InlineCacheBuffer::ic_buffer_entry_point(address code_begin) {
+-  NativeMovConstReg* move = nativeMovConstReg_at(code_begin);   // creation also verifies the object
+-  NativeJump*        jump = nativeJump_at(move->next_instruction_address());
+-  return jump->jump_destination();
+-}
+-
+-
+-void* InlineCacheBuffer::ic_buffer_cached_value(address code_begin) {
+-  NativeMovConstReg* move = nativeMovConstReg_at(code_begin);   // creation also verifies the object
+-  NativeJump*        jump = nativeJump_at(move->next_instruction_address());
+-  void* o = (void*)move->data();
+-  return o;
+-}
+diff --git a/src/hotspot/cpu/sparc/interp_masm_sparc.cpp b/src/hotspot/cpu/sparc/interp_masm_sparc.cpp
+index f4c3a9b43..d10d0c46b 100644
+--- a/src/hotspot/cpu/sparc/interp_masm_sparc.cpp
++++ b/src/hotspot/cpu/sparc/interp_masm_sparc.cpp
+@@ -678,8 +678,6 @@ void InterpreterMacroAssembler::get_cache_index_at_bcp(Register temp, Register i
+     get_2_byte_integer_at_bcp(bcp_offset, temp, index, Unsigned);
+   } else if (index_size == sizeof(u4)) {
+     get_4_byte_integer_at_bcp(bcp_offset, temp, index);
+-    assert(ConstantPool::decode_invokedynamic_index(~123) == 123, "else change next line");
+-    xor3(index, -1, index);  // convert to plain index
+   } else if (index_size == sizeof(u1)) {
+     ldub(Lbcp, bcp_offset, index);
+   } else {
+diff --git a/src/hotspot/cpu/sparc/macroAssembler_sparc.cpp b/src/hotspot/cpu/sparc/macroAssembler_sparc.cpp
+index 5aacccfa5..d2e60b5c4 100644
+--- a/src/hotspot/cpu/sparc/macroAssembler_sparc.cpp
++++ b/src/hotspot/cpu/sparc/macroAssembler_sparc.cpp
+@@ -25,6 +25,7 @@
+ #include "precompiled.hpp"
+ #include "jvm.h"
+ #include "asm/macroAssembler.inline.hpp"
++#include "code/compiledIC.hpp"
+ #include "compiler/disassembler.hpp"
+ #include "gc/shared/collectedHeap.inline.hpp"
+ #include "gc/shared/barrierSet.hpp"
+@@ -1000,8 +1001,45 @@ void  MacroAssembler::set_narrow_klass(Klass* k, Register d) {
+ 
+ }
+ 
++void MacroAssembler::align(int modulus, int target) {
++  int delta = target - offset();
++  while ((offset() + delta) % modulus != 0) nop();
++}
++
+ void MacroAssembler::align(int modulus) {
+-  while (offset() % modulus != 0) nop();
++  align(modulus, offset());
++}
++
++int MacroAssembler::ic_check_size() {
++  return 4 * BytesPerInstWord;
++}
++
++int MacroAssembler::ic_check(int end_alignment) {
++  Register receiver = O0;
++  Register data = G5_inline_cache_reg;
++  Register tmp1 = G3_scratch;
++  Register tmp2 = G1;
++
++  // The UEP of a code blob ensures that the VEP is padded. However, the padding of the UEP is placed
++  // before the inline cache check, so we don't have to execute any nop instructions when dispatching
++  // through the UEP, yet we can ensure that the VEP is aligned appropriately. That's why we align
++  // before the inline cache check here, and not after
++  align(end_alignment, offset() + ic_check_size());
++
++  int uep_offset = offset();
++
++  if (UseCompressedClassPointers) {
++    lduw(receiver, oopDesc::klass_offset_in_bytes(), tmp1);
++  } else {
++    ldx(receiver, oopDesc::klass_offset_in_bytes(), tmp1);
++  }
++  ldx(data, in_bytes(CompiledICData::speculated_klass_offset()), tmp2);
++  cmp(tmp1, tmp2);
++  // A miss traps; the signal handler continues in the ic miss stub.
++  trap(Assembler::notEqual, Assembler::ptr_cc, G0, ST_RESERVED_FOR_USER_0 + 2);
++
++  assert(offset() - uep_offset == ic_check_size(), "ic_check_size() mismatch");
++  return uep_offset;
+ }
+ 
+ void RegistersForDebugging::print(outputStream* s) {
+@@ -2670,17 +2708,6 @@ void MacroAssembler::zero_memory(Register base, Register index) {
+   delayed()->st_ptr(G0, base, index);
+ }
+ 
+-void MacroAssembler::incr_allocated_bytes(RegisterOrConstant size_in_bytes,
+-                                          Register t1, Register t2) {
+-  // Bump total bytes allocated by this thread
+-  assert(t1->is_global(), "must be global reg"); // so all 64 bits are saved on a context switch
+-  assert_different_registers(size_in_bytes.register_or_noreg(), t1, t2);
+-  // v8 support has gone the way of the dodo
+-  ldx(G2_thread, in_bytes(JavaThread::allocated_bytes_offset()), t1);
+-  add(t1, ensure_simm13_or_reg(size_in_bytes, t2), t1);
+-  stx(t1, G2_thread, in_bytes(JavaThread::allocated_bytes_offset()));
+-}
+-
+ Assembler::Condition MacroAssembler::negate_condition(Assembler::Condition cond) {
+   switch (cond) {
+     // Note some conditions are synonyms for others
+diff --git a/src/hotspot/cpu/sparc/macroAssembler_sparc.hpp b/src/hotspot/cpu/sparc/macroAssembler_sparc.hpp
+index 3512fa2a3..ce43013d8 100644
+--- a/src/hotspot/cpu/sparc/macroAssembler_sparc.hpp
++++ b/src/hotspot/cpu/sparc/macroAssembler_sparc.hpp
+@@ -243,7 +243,9 @@ class Address {
+   const RelocationHolder&    rspec() { return _rspec; }
+ 
+   RelocationHolder rspec(int offset) const {
+-    return offset == 0 ? _rspec : _rspec.plus(offset);
++    // Relocations no longer carry an offset (pd_set_data_value would drop it).
++    guarantee(offset == 0 || _rspec.type() == relocInfo::none, "relocation with offset");
++    return _rspec;
+   }
+ 
+   inline bool is_simm13(int offset = 0);  // check disp+offset for overflow
+@@ -378,7 +380,9 @@ class AddressLiteral {
+   const RelocationHolder&    rspec() const { return _rspec; }
+ 
+   RelocationHolder rspec(int offset) const {
+-    return offset == 0 ? _rspec : _rspec.plus(offset);
++    // Relocations no longer carry an offset (pd_set_data_value would drop it).
++    guarantee(offset == 0 || _rspec.type() == relocInfo::none, "relocation with offset");
++    return _rspec;
+   }
+ };
+ 
+@@ -1087,6 +1091,10 @@ class MacroAssembler : public Assembler {
+ 
+   // nop padding
+   void align(int modulus);
++  void align(int modulus, int target);
++
++  static int ic_check_size();
++  int ic_check(int end_alignment);
+ 
+   // declare a safepoint
+   void safepoint();
+@@ -1166,8 +1174,6 @@ class MacroAssembler : public Assembler {
+     Label&   slow_case                 // continuation point if fast allocation fails
+   );
+   void zero_memory(Register base, Register index);
+-  void incr_allocated_bytes(RegisterOrConstant size_in_bytes,
+-                            Register t1, Register t2);
+ 
+   // interface method calling
+   void lookup_interface_method(Register recv_klass,
+diff --git a/src/hotspot/cpu/sparc/matcher_sparc.hpp b/src/hotspot/cpu/sparc/matcher_sparc.hpp
+index 7ae707b55..d445c8a5f 100644
+--- a/src/hotspot/cpu/sparc/matcher_sparc.hpp
++++ b/src/hotspot/cpu/sparc/matcher_sparc.hpp
+@@ -127,6 +127,11 @@
+     return false;
+   }
+ 
++  // Does target support predicated operation emulation.
++  static bool supports_vector_predicate_op_emulation(int vopc, int vlen, BasicType bt) {
++    return false;
++  }
++
+   // Does the CPU supports vector variable rotate instructions?
+   static constexpr bool supports_vector_variable_rotates(void) {
+     return false;
+@@ -189,4 +194,9 @@
+     return BoolTest::illegal;
+   }
+ 
++  // Is SIMD sort supported for this CPU?
++  static bool supports_simd_sort(BasicType bt) {
++    return false;
++  }
++
+ #endif // CPU_SPARC_MATCHER_SPARC_HPP
+diff --git a/src/hotspot/cpu/sparc/nativeInst_sparc.cpp b/src/hotspot/cpu/sparc/nativeInst_sparc.cpp
+index b7130cd54..a31b04601 100644
+--- a/src/hotspot/cpu/sparc/nativeInst_sparc.cpp
++++ b/src/hotspot/cpu/sparc/nativeInst_sparc.cpp
+@@ -151,7 +151,7 @@ void NativeCall::print() {
+ // second word is harmless, and the new second word may be
+ // harmlessly executed in the delay slot of the call.
+ void NativeCall::replace_mt_safe(address instr_addr, address code_buffer) {
+-  assert(Patching_lock->is_locked() ||
++  assert(CodeCache_lock->is_locked() ||
+          SafepointSynchronize::is_at_safepoint(), "concurrent code patching");
+    assert (instr_addr != NULL, "illegal address for code patching");
+    NativeCall* n_call =  nativeCall_at (instr_addr); // checking that it is a call
+@@ -190,7 +190,7 @@ void NativeCall::replace_mt_safe(address instr_addr, address code_buffer) {
+ //
+ // Used in the runtime linkage of calls; see class CompiledIC.
+ void NativeCall::set_destination_mt_safe(address dest) {
+-  assert((Patching_lock->is_locked() || SafepointSynchronize::is_at_safepoint()) ||
++  assert((CodeCache_lock->is_locked() || SafepointSynchronize::is_at_safepoint()) ||
+          CompiledICLocker::is_safe(addr_at(0)),
+          "concurrent code patching");
+   // set_destination uses set_long_at which does the ICache::invalidate
+@@ -882,7 +882,7 @@ void NativeGeneralJump::insert_unconditional(address code_pos, address entry) {
+ // second word is harmless, and the new second word may be
+ // harmlessly executed in the delay slot of the call.
+ void NativeGeneralJump::replace_mt_safe(address instr_addr, address code_buffer) {
+-   assert(Patching_lock->is_locked() ||
++   assert(CodeCache_lock->is_locked() ||
+          SafepointSynchronize::is_at_safepoint(), "concurrent code patching");
+    assert (instr_addr != NULL, "illegal address for code patching");
+    NativeGeneralJump* h_jump =  nativeGeneralJump_at (instr_addr); // checking that it is a call
+diff --git a/src/hotspot/cpu/sparc/nativeInst_sparc.hpp b/src/hotspot/cpu/sparc/nativeInst_sparc.hpp
+index b6662bc77..373c6bf63 100644
+--- a/src/hotspot/cpu/sparc/nativeInst_sparc.hpp
++++ b/src/hotspot/cpu/sparc/nativeInst_sparc.hpp
+@@ -814,8 +814,8 @@ class NativeIllegalInstruction: public NativeInstruction {
+ class NativePostCallNop: public NativeInstruction {
+ public:
+   bool check() const { Unimplemented(); return false; }
+-  int displacement() const { return 0; }
+-  void patch(jint diff) { Unimplemented(); }
++  bool decode(int32_t& oopmap_slot, int32_t& cb_offset) const { return false; }
++  bool patch(int32_t oopmap_slot, int32_t cb_offset) { Unimplemented(); return false; }
+   void make_deopt() { Unimplemented(); }
+ };
+ 
+diff --git a/src/hotspot/cpu/sparc/relocInfo_sparc.cpp b/src/hotspot/cpu/sparc/relocInfo_sparc.cpp
+index 27fb4e595..055f80fa6 100644
+--- a/src/hotspot/cpu/sparc/relocInfo_sparc.cpp
++++ b/src/hotspot/cpu/sparc/relocInfo_sparc.cpp
+@@ -31,7 +31,7 @@
+ #include "oops/oop.hpp"
+ #include "runtime/safepoint.hpp"
+ 
+-void Relocation::pd_set_data_value(address x, intptr_t o, bool verify_only) {
++void Relocation::pd_set_data_value(address x, bool verify_only) {
+   NativeInstruction* ip = nativeInstruction_at(addr());
+   jint inst = ip->long_at(0);
+   assert(inst != NativeInstruction::illegal_instruction(), "no breakpoint");
+@@ -80,7 +80,7 @@ void Relocation::pd_set_data_value(address x, intptr_t o, bool verify_only) {
+     #endif
+     {
+     guarantee(Assembler::inv_immed(inst), "must have a simm13 field");
+-    int simm13 = Assembler::low10((intptr_t)x) + o;
++    int simm13 = Assembler::low10((intptr_t)x);
+     guarantee(Assembler::is_simm13(simm13), "offset can't overflow simm13");
+     inst &= ~Assembler::simm(    -1, 13);
+     inst |=  Assembler::simm(simm13, 13);
+diff --git a/src/hotspot/cpu/sparc/sharedRuntime_sparc.cpp b/src/hotspot/cpu/sparc/sharedRuntime_sparc.cpp
+index 667f7d16e..f087746a1 100644
+--- a/src/hotspot/cpu/sparc/sharedRuntime_sparc.cpp
++++ b/src/hotspot/cpu/sparc/sharedRuntime_sparc.cpp
+@@ -25,14 +25,13 @@
+ #include "precompiled.hpp"
+ #include "asm/macroAssembler.inline.hpp"
+ #include "code/debugInfoRec.hpp"
+-#include "code/icBuffer.hpp"
++#include "code/compiledIC.hpp"
+ #include "code/vtableStubs.hpp"
+ #include "compiler/oopMap.hpp"
+ #include "gc/shared/gcLocker.hpp"
+ #include "interpreter/interpreter.hpp"
+ #include "logging/log.hpp"
+ #include "memory/resourceArea.hpp"
+-#include "oops/compiledICHolder.hpp"
+ #include "oops/klass.inline.hpp"
+ #include "prims/methodHandles.hpp"
+ #include "runtime/jniHandles.hpp"
+@@ -890,28 +889,15 @@ AdapterHandlerEntry* SharedRuntime::generate_i2c2i_adapters(MacroAssembler *masm
+   address c2i_unverified_entry = __ pc();
+   Label L_skip_fixup;
+   {
+-    Register R_temp = G1;  // another scratch register
+-
+     AddressLiteral ic_miss(SharedRuntime::get_ic_miss_stub());
+ 
+-    __ verify_oop(O0);
+-    __ load_klass(O0, G3_scratch);
+-
+-    __ ld_ptr(G5_method, CompiledICHolder::holder_klass_offset(), R_temp);
+-    __ cmp(G3_scratch, R_temp);
+-
+-    Label ok, ok2;
+-    __ brx(Assembler::equal, false, Assembler::pt, ok);
+-    __ delayed()->ld_ptr(G5_method, CompiledICHolder::holder_metadata_offset(), G5_method);
+-    __ jump_to(ic_miss, G3_scratch);
+-    __ delayed()->nop();
++    __ ic_check(BytesPerInstWord);
++    __ ld_ptr(G5_method, in_bytes(CompiledICData::speculated_method_offset()), G5_method);
+ 
+-    __ bind(ok);
+     // Method might have been compiled since the call site was patched to
+     // interpreted if that is the case treat it as a miss so we can get
+     // the call site corrected.
+     __ ld_ptr(G5_method, in_bytes(Method::code_offset()), G3_scratch);
+-    __ bind(ok2);
+     __ br_null(G3_scratch, false, Assembler::pt, L_skip_fixup);
+     __ delayed()->nop();
+     __ jump_to(ic_miss, G3_scratch);
+@@ -1606,18 +1592,8 @@ nmethod* SharedRuntime::generate_native_wrapper(MacroAssembler* masm,
+   intptr_t start = (intptr_t)__ pc();
+ 
+   // First thing make an ic check to see if we should even be here
+-  {
+-    Label L;
+-    const Register temp_reg = G3_scratch;
+-    AddressLiteral ic_miss(SharedRuntime::get_ic_miss_stub());
+-    __ verify_oop(O0);
+-    __ load_klass(O0, temp_reg);
+-    __ cmp_and_brx_short(temp_reg, G5_inline_cache_reg, Assembler::equal, Assembler::pt, L);
+-
+-    __ jump_to(ic_miss, temp_reg);
+-    __ delayed()->nop();
+-    __ align(CodeEntryAlignment);
+-    __ bind(L);
++  if (!method->is_static()) {
++    __ ic_check(CodeEntryAlignment);
+   }
+ 
+   int vep_offset = ((intptr_t)__ pc()) - start;
+diff --git a/src/hotspot/cpu/sparc/smallRegisterMap_sparc.inline.hpp b/src/hotspot/cpu/sparc/smallRegisterMap_sparc.inline.hpp
+index cbb4b9b0e..ae8b9dd31 100644
+--- a/src/hotspot/cpu/sparc/smallRegisterMap_sparc.inline.hpp
++++ b/src/hotspot/cpu/sparc/smallRegisterMap_sparc.inline.hpp
+@@ -30,8 +30,15 @@
+ 
+ // Java frames don't have callee saved registers (except for rfp), so we can use a smaller RegisterMap
+ class SmallRegisterMap {
++  constexpr SmallRegisterMap() = default;
++  ~SmallRegisterMap() = default;
++  NONCOPYABLE(SmallRegisterMap);
++
+ public:
+-  static constexpr SmallRegisterMap* instance = nullptr;
++  static const SmallRegisterMap* instance() {
++    static constexpr SmallRegisterMap the_instance{};
++    return &the_instance;
++  }
+ private:
+   static void assert_is_rfp(VMReg r) NOT_DEBUG_RETURN
+                                      DEBUG_ONLY({ Unimplemented(); })
+@@ -46,12 +53,6 @@ class SmallRegisterMap {
+     return map;
+   }
+ 
+-  SmallRegisterMap() {}
+-
+-  SmallRegisterMap(const RegisterMap* map) {
+-    Unimplemented();
+-  }
+-
+   inline address location(VMReg reg, intptr_t* sp) const {
+     Unimplemented();
+     return nullptr;
+diff --git a/src/hotspot/cpu/sparc/sparc.ad b/src/hotspot/cpu/sparc/sparc.ad
+index b57ee301b..e9074509f 100644
+--- a/src/hotspot/cpu/sparc/sparc.ad
++++ b/src/hotspot/cpu/sparc/sparc.ad
+@@ -460,8 +460,8 @@ class HandlerImpl {
+ 
+  public:
+ 
+-  static int emit_exception_handler(CodeBuffer &cbuf);
+-  static int emit_deopt_handler(CodeBuffer& cbuf);
++  static int emit_exception_handler(C2_MacroAssembler *masm);
++  static int emit_deopt_handler(C2_MacroAssembler *masm);
+ 
+   static uint size_exception_handler() {
+     return ( NativeJump::instruction_size ); // sethi;jmp;nop
+@@ -482,7 +482,7 @@ public:
+ %}
+ 
+ source %{
+-#define __ _masm.
++#define __ masm->
+ 
+ // tertiary op of a LoadP or StoreP encoding
+ #define REGP_OP true
+@@ -579,8 +579,7 @@ int MachCallRuntimeNode::ret_addr_offset() {
+ }
+ 
+ // emit an interrupt that is caught by the debugger (for debugging compiler)
+-void emit_break(CodeBuffer &cbuf) {
+-  C2_MacroAssembler _masm(&cbuf);
++void emit_break(C2_MacroAssembler *masm) {
+   __ breakpoint_trap();
+ }
+ 
+@@ -590,8 +589,8 @@ void MachBreakpointNode::format( PhaseRegAlloc *, outputStream *st ) const {
+ }
+ #endif
+ 
+-void MachBreakpointNode::emit(CodeBuffer &cbuf, PhaseRegAlloc *ra_) const {
+-  emit_break(cbuf);
++void MachBreakpointNode::emit(C2_MacroAssembler *masm, PhaseRegAlloc *ra_) const {
++  emit_break(masm);
+ }
+ 
+ uint MachBreakpointNode::size(PhaseRegAlloc *ra_) const {
+@@ -599,28 +598,24 @@ uint MachBreakpointNode::size(PhaseRegAlloc *ra_) const {
+ }
+ 
+ // Traceable jump
+-void  emit_jmpl(CodeBuffer &cbuf, int jump_target) {
+-  C2_MacroAssembler _masm(&cbuf);
++void  emit_jmpl(C2_MacroAssembler *masm, int jump_target) {
+   Register rdest = reg_to_register_object(jump_target);
+   __ JMP(rdest, 0);
+   __ delayed()->nop();
+ }
+ 
+ // Traceable jump and set exception pc
+-void  emit_jmpl_set_exception_pc(CodeBuffer &cbuf, int jump_target) {
+-  C2_MacroAssembler _masm(&cbuf);
++void  emit_jmpl_set_exception_pc(C2_MacroAssembler *masm, int jump_target) {
+   Register rdest = reg_to_register_object(jump_target);
+   __ JMP(rdest, 0);
+   __ delayed()->add(O7, frame::pc_return_offset, Oissuing_pc );
+ }
+ 
+-void emit_nop(CodeBuffer &cbuf) {
+-  C2_MacroAssembler _masm(&cbuf);
++void emit_nop(C2_MacroAssembler *masm) {
+   __ nop();
+ }
+ 
+-void emit_illtrap(CodeBuffer &cbuf) {
+-  C2_MacroAssembler _masm(&cbuf);
++void emit_illtrap(C2_MacroAssembler *masm) {
+   __ illtrap(0);
+ }
+ 
+@@ -679,7 +674,7 @@ static inline jlong replicate_immF(float con) {
+ }
+ 
+ // Standard Sparc opcode form2 field breakdown
+-static inline void emit2_19(CodeBuffer &cbuf, int f30, int f29, int f25, int f22, int f20, int f19, int f0 ) {
++static inline void emit2_19(C2_MacroAssembler *masm, int f30, int f29, int f25, int f22, int f20, int f19, int f0 ) {
+   f0 &= (1<<19)-1;     // Mask displacement to 19 bits
+   int op = (f30 << 30) |
+            (f29 << 29) |
+@@ -688,33 +683,33 @@ static inline void emit2_19(CodeBuffer &cbuf, int f30, int f29, int f25, int f22
+            (f20 << 20) |
+            (f19 << 19) |
+            (f0  <<  0);
+-  cbuf.insts()->emit_int32(op);
++  masm->code()->insts()->emit_int32(op);
+ }
+ 
+ // Standard Sparc opcode form2 field breakdown
+-static inline void emit2_22(CodeBuffer &cbuf, int f30, int f25, int f22, int f0 ) {
++static inline void emit2_22(C2_MacroAssembler *masm, int f30, int f25, int f22, int f0 ) {
+   f0 >>= 10;           // Drop 10 bits
+   f0 &= (1<<22)-1;     // Mask displacement to 22 bits
+   int op = (f30 << 30) |
+            (f25 << 25) |
+            (f22 << 22) |
+            (f0  <<  0);
+-  cbuf.insts()->emit_int32(op);
++  masm->code()->insts()->emit_int32(op);
+ }
+ 
+ // Standard Sparc opcode form3 field breakdown
+-static inline void emit3(CodeBuffer &cbuf, int f30, int f25, int f19, int f14, int f5, int f0 ) {
++static inline void emit3(C2_MacroAssembler *masm, int f30, int f25, int f19, int f14, int f5, int f0 ) {
+   int op = (f30 << 30) |
+            (f25 << 25) |
+            (f19 << 19) |
+            (f14 << 14) |
+            (f5  <<  5) |
+            (f0  <<  0);
+-  cbuf.insts()->emit_int32(op);
++  masm->code()->insts()->emit_int32(op);
+ }
+ 
+ // Standard Sparc opcode form3 field breakdown
+-static inline void emit3_simm13(CodeBuffer &cbuf, int f30, int f25, int f19, int f14, int simm13 ) {
++static inline void emit3_simm13(C2_MacroAssembler *masm, int f30, int f25, int f19, int f14, int simm13 ) {
+   simm13 &= (1<<13)-1; // Mask to 13 bits
+   int op = (f30 << 30) |
+            (f25 << 25) |
+@@ -722,12 +717,12 @@ static inline void emit3_simm13(CodeBuffer &cbuf, int f30, int f25, int f19, int
+            (f14 << 14) |
+            (1   << 13) | // bit to indicate immediate-mode
+            (simm13<<0);
+-  cbuf.insts()->emit_int32(op);
++  masm->code()->insts()->emit_int32(op);
+ }
+ 
+-static inline void emit3_simm10(CodeBuffer &cbuf, int f30, int f25, int f19, int f14, int simm10 ) {
++static inline void emit3_simm10(C2_MacroAssembler *masm, int f30, int f25, int f19, int f14, int simm10 ) {
+   simm10 &= (1<<10)-1; // Mask to 10 bits
+-  emit3_simm13(cbuf,f30,f25,f19,f14,simm10);
++  emit3_simm13(masm,f30,f25,f19,f14,simm10);
+ }
+ 
+ #ifdef ASSERT
+@@ -740,7 +735,7 @@ void verify_oops_warning(const MachNode *n, int ideal_op, int mem_op) {
+ #endif
+ 
+ 
+-void emit_form3_mem_reg(CodeBuffer &cbuf, PhaseRegAlloc* ra, const MachNode* n, int primary, int tertiary,
++void emit_form3_mem_reg(C2_MacroAssembler *masm, PhaseRegAlloc* ra, const MachNode* n, int primary, int tertiary,
+                         int src1_enc, int disp32, int src2_enc, int dst_enc) {
+ 
+ #ifdef ASSERT
+@@ -895,7 +890,6 @@ void emit_form3_mem_reg(CodeBuffer &cbuf, PhaseRegAlloc* ra, const MachNode* n,
+     disp += STACK_BIAS;
+     // Check that stack offset fits, load into O7 if not
+     if (!Assembler::is_simm13(disp)) {
+-      C2_MacroAssembler _masm(&cbuf);
+       __ set(disp, O7);
+       if (index != R_G0_enc) {
+         __ add(O7, reg_to_register_object(index), O7);
+@@ -915,11 +909,10 @@ void emit_form3_mem_reg(CodeBuffer &cbuf, PhaseRegAlloc* ra, const MachNode* n,
+     instr |= disp & 0x1FFF;
+   }
+ 
+-  cbuf.insts()->emit_int32(instr);
++  masm->code()->insts()->emit_int32(instr);
+ 
+ #ifdef ASSERT
+   if (VerifyOops) {
+-    C2_MacroAssembler _masm(&cbuf);
+     if (is_verified_oop_base) {
+       __ verify_oop(reg_to_register_object(src1_enc));
+     }
+@@ -936,7 +929,7 @@ void emit_form3_mem_reg(CodeBuffer &cbuf, PhaseRegAlloc* ra, const MachNode* n,
+ #endif
+ }
+ 
+-void emit_call_reloc(CodeBuffer &cbuf, intptr_t entry_point, RelocationHolder const& rspec, bool preserve_g2 = false) {
++void emit_call_reloc(C2_MacroAssembler *masm, intptr_t entry_point, RelocationHolder const& rspec, bool preserve_g2 = false) {
+   // The method which records debug information at every safepoint
+   // expects the call to be the first instruction in the snippet as
+   // it creates a PcDesc structure which tracks the offset of a call
+@@ -947,7 +940,6 @@ void emit_call_reloc(CodeBuffer &cbuf, intptr_t entry_point, RelocationHolder co
+   // putting the "mov" instruction in the delay slot but the problem
+   // may bite us again at some other point and a cleaner/generic
+   // solution using relocations would be needed.
+-  C2_MacroAssembler _masm(&cbuf);
+   __ set_inst_mark();
+ 
+   // We flush the current window just so that there is a valid stack copy
+@@ -982,8 +974,8 @@ void emit_call_reloc(CodeBuffer &cbuf, intptr_t entry_point, RelocationHolder co
+ 
+ //=============================================================================
+ // REQUIRED FUNCTIONALITY for encoding
+-void emit_lo(CodeBuffer &cbuf, int val) {  }
+-void emit_hi(CodeBuffer &cbuf, int val) {  }
++void emit_lo(C2_MacroAssembler *masm, int val) {  }
++void emit_hi(C2_MacroAssembler *masm, int val) {  }
+ 
+ 
+ //=============================================================================
+@@ -1002,10 +994,9 @@ void MachConstantBaseNode::postalloc_expand(GrowableArray <Node *> *nodes, Phase
+   ShouldNotReachHere();
+ }
+ 
+-void MachConstantBaseNode::emit(CodeBuffer& cbuf, PhaseRegAlloc* ra_) const {
++void MachConstantBaseNode::emit(C2_MacroAssembler *masm, PhaseRegAlloc* ra_) const {
+   Compile* C = ra_->C;
+   ConstantTable& constant_table = C->output()->constant_table();
+-  C2_MacroAssembler _masm(&cbuf);
+ 
+   Register r = as_Register(ra_->get_encode(this));
+   CodeSection* consts_section = __ code()->consts();
+@@ -1065,9 +1056,8 @@ void MachPrologNode::format( PhaseRegAlloc *ra_, outputStream *st ) const {
+ }
+ #endif
+ 
+-void MachPrologNode::emit(CodeBuffer &cbuf, PhaseRegAlloc *ra_) const {
++void MachPrologNode::emit(C2_MacroAssembler *masm, PhaseRegAlloc *ra_) const {
+   Compile* C = ra_->C;
+-  C2_MacroAssembler _masm(&cbuf);
+ 
+   for (int i = 0; i < OptoPrologueNops; i++) {
+     __ nop();
+@@ -1135,8 +1125,7 @@ void MachEpilogNode::format( PhaseRegAlloc *ra_, outputStream *st ) const {
+ }
+ #endif
+ 
+-void MachEpilogNode::emit(CodeBuffer &cbuf, PhaseRegAlloc *ra_) const {
+-  C2_MacroAssembler _masm(&cbuf);
++void MachEpilogNode::emit(C2_MacroAssembler *masm, PhaseRegAlloc *ra_) const {
+   Compile* C = ra_->C;
+ 
+   __ verify_thread();
+@@ -1206,9 +1195,9 @@ static void print_helper(outputStream* st, const char* format, ...) {
+ }
+ #endif // !PRODUCT
+ 
+-static void impl_helper(const MachNode* mach, CodeBuffer* cbuf, PhaseRegAlloc* ra, bool is_load, int offset, int reg, int opcode, const char *op_str, outputStream* st) {
+-  if (cbuf) {
+-    emit_form3_mem_reg(*cbuf, ra, mach, opcode, -1, R_SP_enc, offset, 0, Matcher::_regEncode[reg]);
++static void impl_helper(const MachNode* mach, C2_MacroAssembler *masm, PhaseRegAlloc* ra, bool is_load, int offset, int reg, int opcode, const char *op_str, outputStream* st) {
++  if (masm) {
++    emit_form3_mem_reg(masm, ra, mach, opcode, -1, R_SP_enc, offset, 0, Matcher::_regEncode[reg]);
+   }
+ #ifndef PRODUCT
+   else {
+@@ -1221,9 +1210,9 @@ static void impl_helper(const MachNode* mach, CodeBuffer* cbuf, PhaseRegAlloc* r
+ #endif
+ }
+ 
+-static void impl_mov_helper(CodeBuffer *cbuf, int src, int dst, int op1, int op2, const char *op_str, outputStream* st) {
+-  if (cbuf) {
+-    emit3(*cbuf, Assembler::arith_op, Matcher::_regEncode[dst], op1, 0, op2, Matcher::_regEncode[src]);
++static void impl_mov_helper(C2_MacroAssembler *masm, int src, int dst, int op1, int op2, const char *op_str, outputStream* st) {
++  if (masm) {
++    emit3(masm, Assembler::arith_op, Matcher::_regEncode[dst], op1, 0, op2, Matcher::_regEncode[src]);
+   }
+ #ifndef PRODUCT
+   else {
+@@ -1233,7 +1222,7 @@ static void impl_mov_helper(CodeBuffer *cbuf, int src, int dst, int op1, int op2
+ }
+ 
+ static void mach_spill_copy_implementation_helper(const MachNode* mach,
+-                                                  CodeBuffer *cbuf,
++                                                  C2_MacroAssembler *masm,
+                                                   PhaseRegAlloc *ra_,
+                                                   outputStream* st) {
+   // Get registers to move
+@@ -1262,9 +1251,9 @@ static void mach_spill_copy_implementation_helper(const MachNode* mach,
+     if ((src_first&1) == 0 && src_first+1 == src_second) {
+       src_second    = OptoReg::Name(R_F31_num);
+       src_second_rc = rc_float;
+-      impl_helper(mach, cbuf, ra_, true, offset, R_F30_num, Assembler::lddf_op3, "LDDF", st);
++      impl_helper(mach, masm, ra_, true, offset, R_F30_num, Assembler::lddf_op3, "LDDF", st);
+     } else {
+-      impl_helper(mach, cbuf, ra_, true, offset, R_F30_num, Assembler::ldf_op3, "LDF ", st);
++      impl_helper(mach, masm, ra_, true, offset, R_F30_num, Assembler::ldf_op3, "LDF ", st);
+     }
+     src_first    = OptoReg::Name(R_F30_num);
+     src_first_rc = rc_float;
+@@ -1272,7 +1261,7 @@ static void mach_spill_copy_implementation_helper(const MachNode* mach,
+ 
+   if( src_second_rc == rc_stack && dst_second_rc == rc_stack ) {
+     int offset = ra_->reg2offset(src_second);
+-    impl_helper(mach, cbuf, ra_, true, offset, R_F31_num, Assembler::ldf_op3, "LDF ", st);
++    impl_helper(mach, masm, ra_, true, offset, R_F31_num, Assembler::ldf_op3, "LDF ", st);
+     src_second    = OptoReg::Name(R_F31_num);
+     src_second_rc = rc_float;
+   }
+@@ -1281,17 +1270,17 @@ static void mach_spill_copy_implementation_helper(const MachNode* mach,
+   // Check for float->int copy; requires a trip through memory
+   if (src_first_rc == rc_float && dst_first_rc == rc_int && UseVIS < 3) {
+     int offset = frame::register_save_words*wordSize;
+-    if (cbuf) {
+-      emit3_simm13(*cbuf, Assembler::arith_op, R_SP_enc, Assembler::sub_op3, R_SP_enc, 16);
+-      impl_helper(mach, cbuf, ra_, false, offset, src_first,  Assembler::stf_op3, "STF ", st);
+-      impl_helper(mach, cbuf, ra_,  true, offset, dst_first, Assembler::lduw_op3, "LDUW", st);
+-      emit3_simm13(*cbuf, Assembler::arith_op, R_SP_enc, Assembler::add_op3, R_SP_enc, 16);
++    if (masm) {
++      emit3_simm13(masm, Assembler::arith_op, R_SP_enc, Assembler::sub_op3, R_SP_enc, 16);
++      impl_helper(mach, masm, ra_, false, offset, src_first,  Assembler::stf_op3, "STF ", st);
++      impl_helper(mach, masm, ra_,  true, offset, dst_first, Assembler::lduw_op3, "LDUW", st);
++      emit3_simm13(masm, Assembler::arith_op, R_SP_enc, Assembler::add_op3, R_SP_enc, 16);
+     }
+ #ifndef PRODUCT
+     else {
+       print_helper(st, "SUB    R_SP,16,R_SP");
+-      impl_helper(mach, cbuf, ra_, false, offset, src_first,  Assembler::stf_op3, "STF ", st);
+-      impl_helper(mach, cbuf, ra_,  true, offset, dst_first, Assembler::lduw_op3, "LDUW", st);
++      impl_helper(mach, masm, ra_, false, offset, src_first,  Assembler::stf_op3, "STF ", st);
++      impl_helper(mach, masm, ra_,  true, offset, dst_first, Assembler::lduw_op3, "LDUW", st);
+       print_helper(st, "ADD    R_SP,16,R_SP");
+     }
+ #endif
+@@ -1301,19 +1290,19 @@ static void mach_spill_copy_implementation_helper(const MachNode* mach,
+   if (src_first_rc == rc_float && dst_first_rc == rc_int && UseVIS >= 3) {
+     // Further check for aligned-adjacent pair, so we can use a double move
+     if ((src_first & 1) == 0 && src_first + 1 == src_second && (dst_first & 1) == 0 && dst_first + 1 == dst_second) {
+-      impl_mov_helper(cbuf, src_first, dst_first, Assembler::mftoi_op3, Assembler::mdtox_opf, "MOVDTOX", st);
++      impl_mov_helper(masm, src_first, dst_first, Assembler::mftoi_op3, Assembler::mdtox_opf, "MOVDTOX", st);
+       return;
+     }
+-    impl_mov_helper(cbuf, src_first, dst_first, Assembler::mftoi_op3, Assembler::mstouw_opf, "MOVSTOUW", st);
++    impl_mov_helper(masm, src_first, dst_first, Assembler::mftoi_op3, Assembler::mstouw_opf, "MOVSTOUW", st);
+   }
+   // Check for int->float copy on T4
+   if (src_first_rc == rc_int && dst_first_rc == rc_float && UseVIS >= 3) {
+     // Further check for aligned-adjacent pair, so we can use a double move
+     if ((src_first & 1) == 0 && src_first + 1 == src_second && (dst_first & 1) == 0 && dst_first + 1 == dst_second) {
+-      impl_mov_helper(cbuf, src_first, dst_first, Assembler::mftoi_op3, Assembler::mxtod_opf, "MOVXTOD", st);
++      impl_mov_helper(masm, src_first, dst_first, Assembler::mftoi_op3, Assembler::mxtod_opf, "MOVXTOD", st);
+       return;
+     }
+-    impl_mov_helper(cbuf, src_first, dst_first, Assembler::mftoi_op3, Assembler::mwtos_opf, "MOVWTOS", st);
++    impl_mov_helper(masm, src_first, dst_first, Assembler::mftoi_op3, Assembler::mwtos_opf, "MOVWTOS", st);
+   }
+ 
+   // --------------------------------------
+@@ -1328,7 +1317,7 @@ static void mach_spill_copy_implementation_helper(const MachNode* mach,
+   if (src_first_rc == rc_int && dst_first_rc == rc_int) {
+     // Else normal reg-reg copy
+     assert(src_second != dst_first, "smashed second before evacuating it");
+-    impl_mov_helper(cbuf, src_first, dst_first, Assembler::or_op3, 0, "MOV  ", st);
++    impl_mov_helper(masm, src_first, dst_first, Assembler::or_op3, 0, "MOV  ", st);
+     assert((src_first & 1) == 0 && (dst_first & 1) == 0, "never move second-halves of int registers");
+     // This moves an aligned adjacent pair.
+     // See if we are done.
+@@ -1342,10 +1331,10 @@ static void mach_spill_copy_implementation_helper(const MachNode* mach,
+     int offset = ra_->reg2offset(dst_first);
+     // Further check for aligned-adjacent pair, so we can use a double store
+     if ((src_first & 1) == 0 && src_first + 1 == src_second && (dst_first & 1) == 0 && dst_first + 1 == dst_second) {
+-      impl_helper(mach, cbuf, ra_, false, offset, src_first, Assembler::stx_op3, "STX ", st);
++      impl_helper(mach, masm, ra_, false, offset, src_first, Assembler::stx_op3, "STX ", st);
+       return;
+     }
+-    impl_helper(mach, cbuf, ra_, false, offset, src_first, Assembler::stw_op3, "STW ", st);
++    impl_helper(mach, masm, ra_, false, offset, src_first, Assembler::stw_op3, "STW ", st);
+   }
+ 
+   // Check for integer load
+@@ -1353,20 +1342,20 @@ static void mach_spill_copy_implementation_helper(const MachNode* mach,
+     int offset = ra_->reg2offset(src_first);
+     // Further check for aligned-adjacent pair, so we can use a double load
+     if ((src_first & 1) == 0 && src_first + 1 == src_second && (dst_first & 1) == 0 && dst_first + 1 == dst_second) {
+-      impl_helper(mach, cbuf, ra_, true, offset, dst_first, Assembler::ldx_op3, "LDX ", st);
++      impl_helper(mach, masm, ra_, true, offset, dst_first, Assembler::ldx_op3, "LDX ", st);
+       return;
+     }
+-    impl_helper(mach, cbuf, ra_, true, offset, dst_first, Assembler::lduw_op3, "LDUW", st);
++    impl_helper(mach, masm, ra_, true, offset, dst_first, Assembler::lduw_op3, "LDUW", st);
+   }
+ 
+   // Check for float reg-reg copy
+   if (src_first_rc == rc_float && dst_first_rc == rc_float) {
+     // Further check for aligned-adjacent pair, so we can use a double move
+     if ((src_first & 1) == 0 && src_first + 1 == src_second && (dst_first & 1) == 0 && dst_first + 1 == dst_second) {
+-      impl_mov_helper(cbuf, src_first, dst_first, Assembler::fpop1_op3, Assembler::fmovd_opf, "FMOVD", st);
++      impl_mov_helper(masm, src_first, dst_first, Assembler::fpop1_op3, Assembler::fmovd_opf, "FMOVD", st);
+       return;
+     }
+-    impl_mov_helper(cbuf, src_first, dst_first, Assembler::fpop1_op3, Assembler::fmovs_opf, "FMOVS", st);
++    impl_mov_helper(masm, src_first, dst_first, Assembler::fpop1_op3, Assembler::fmovs_opf, "FMOVS", st);
+   }
+ 
+   // Check for float store
+@@ -1374,10 +1363,10 @@ static void mach_spill_copy_implementation_helper(const MachNode* mach,
+     int offset = ra_->reg2offset(dst_first);
+     // Further check for aligned-adjacent pair, so we can use a double store
+     if ((src_first & 1) == 0 && src_first + 1 == src_second && (dst_first & 1) == 0 && dst_first + 1 == dst_second) {
+-      impl_helper(mach, cbuf, ra_, false, offset, src_first, Assembler::stdf_op3, "STDF", st);
++      impl_helper(mach, masm, ra_, false, offset, src_first, Assembler::stdf_op3, "STDF", st);
+       return;
+     }
+-    impl_helper(mach, cbuf, ra_, false, offset, src_first, Assembler::stf_op3, "STF ", st);
++    impl_helper(mach, masm, ra_, false, offset, src_first, Assembler::stf_op3, "STF ", st);
+   }
+ 
+   // Check for float load
+@@ -1385,10 +1374,10 @@ static void mach_spill_copy_implementation_helper(const MachNode* mach,
+     int offset = ra_->reg2offset(src_first);
+     // Further check for aligned-adjacent pair, so we can use a double load
+     if ((src_first & 1) == 0 && src_first + 1 == src_second && (dst_first & 1) == 0 && dst_first + 1 == dst_second) {
+-      impl_helper(mach, cbuf, ra_, true, offset, dst_first, Assembler::lddf_op3, "LDDF", st);
++      impl_helper(mach, masm, ra_, true, offset, dst_first, Assembler::lddf_op3, "LDDF", st);
+       return;
+     }
+-    impl_helper(mach, cbuf, ra_, true, offset, dst_first, Assembler::ldf_op3, "LDF ", st);
++    impl_helper(mach, masm, ra_, true, offset, dst_first, Assembler::ldf_op3, "LDF ", st);
+   }
+ 
+   // --------------------------------------------------------------------
+@@ -1402,12 +1391,12 @@ static void mach_spill_copy_implementation_helper(const MachNode* mach,
+   Unimplemented();
+ }
+ 
+-uint MachSpillCopyNode::implementation(CodeBuffer *cbuf,
++uint MachSpillCopyNode::implementation(C2_MacroAssembler *masm,
+                                        PhaseRegAlloc *ra_,
+                                        bool do_size,
+                                        outputStream* st) const {
+   assert(!do_size, "not supported");
+-  mach_spill_copy_implementation_helper(this, cbuf, ra_, st);
++  mach_spill_copy_implementation_helper(this, masm, ra_, st);
+   return 0;
+ }
+ 
+@@ -1417,8 +1406,8 @@ void MachSpillCopyNode::format( PhaseRegAlloc *ra_, outputStream *st ) const {
+ }
+ #endif
+ 
+-void MachSpillCopyNode::emit(CodeBuffer &cbuf, PhaseRegAlloc *ra_) const {
+-  implementation( &cbuf, ra_, false, NULL );
++void MachSpillCopyNode::emit(C2_MacroAssembler *masm, PhaseRegAlloc *ra_) const {
++  implementation( masm, ra_, false, NULL );
+ }
+ 
+ uint MachSpillCopyNode::size(PhaseRegAlloc *ra_) const {
+@@ -1432,8 +1421,7 @@ void MachNopNode::format(PhaseRegAlloc *, outputStream *st) const {
+ }
+ #endif
+ 
+-void MachNopNode::emit(CodeBuffer &cbuf, PhaseRegAlloc *) const {
+-  C2_MacroAssembler _masm(&cbuf);
++void MachNopNode::emit(C2_MacroAssembler *masm, PhaseRegAlloc *) const {
+   for (int i = 0; i < _count; i += 1) {
+     __ nop();
+   }
+@@ -1453,8 +1441,7 @@ void BoxLockNode::format( PhaseRegAlloc *ra_, outputStream *st ) const {
+ }
+ #endif
+ 
+-void BoxLockNode::emit(CodeBuffer &cbuf, PhaseRegAlloc *ra_) const {
+-  C2_MacroAssembler _masm(&cbuf);
++void BoxLockNode::emit(C2_MacroAssembler *masm, PhaseRegAlloc *ra_) const {
+   int offset = ra_->reg2offset(in_RegMask(0).find_first_elem()) + STACK_BIAS;
+   int reg = ra_->get_encode(this);
+ 
+@@ -1497,18 +1484,8 @@ void MachUEPNode::format( PhaseRegAlloc *ra_, outputStream *st ) const {
+ }
+ #endif
+ 
+-void MachUEPNode::emit(CodeBuffer &cbuf, PhaseRegAlloc *ra_) const {
+-  C2_MacroAssembler _masm(&cbuf);
+-  Register G5_ic_reg  = reg_to_register_object(Matcher::inline_cache_reg_encode());
+-  Register temp_reg   = G3;
+-  assert( G5_ic_reg != temp_reg, "conflicting registers" );
+-
+-  // Load klass from receiver
+-  __ load_klass(O0, temp_reg);
+-  // Compare against expected klass
+-  __ cmp(temp_reg, G5_ic_reg);
+-  // Branch to miss code, checks xcc or icc depending
+-  __ trap(Assembler::notEqual, Assembler::ptr_cc, G0, ST_RESERVED_FOR_USER_0+2);
++void MachUEPNode::emit(C2_MacroAssembler *masm, PhaseRegAlloc *ra_) const {
++  __ ic_check(CodeEntryAlignment);
+ }
+ 
+ uint MachUEPNode::size(PhaseRegAlloc *ra_) const {
+@@ -1520,10 +1497,9 @@ uint MachUEPNode::size(PhaseRegAlloc *ra_) const {
+ 
+ 
+ // Emit exception handler code.
+-int HandlerImpl::emit_exception_handler(CodeBuffer& cbuf) {
++int HandlerImpl::emit_exception_handler(C2_MacroAssembler *masm) {
+   Register temp_reg = G3;
+   AddressLiteral exception_blob(OptoRuntime::exception_blob()->entry_point());
+-  C2_MacroAssembler _masm(&cbuf);
+ 
+   address base = __ start_a_stub(size_exception_handler());
+   if (base == NULL) {
+@@ -1543,12 +1519,11 @@ int HandlerImpl::emit_exception_handler(CodeBuffer& cbuf) {
+   return offset;
+ }
+ 
+-int HandlerImpl::emit_deopt_handler(CodeBuffer& cbuf) {
++int HandlerImpl::emit_deopt_handler(C2_MacroAssembler *masm) {
+   // Can't use any of the current frame's registers as we may have deopted
+   // at a poll and everything (including G3) can be live.
+   Register temp_reg = L0;
+   AddressLiteral deopt_blob(SharedRuntime::deopt_blob()->unpack());
+-  C2_MacroAssembler _masm(&cbuf);
+ 
+   address base = __ start_a_stub(size_deopt_handler());
+   if (base == NULL) {
+@@ -1621,11 +1596,11 @@ bool Matcher::match_rule_supported_vector(int opcode, int vlen, BasicType bt) {
+   return ret_value;  // Per default match rules are supported.
+ }
+ 
+-int Matcher::superword_max_vector_size(const BasicType bt) {
++int Matcher::max_vector_size_auto_vectorization(const BasicType bt) {
+   return Matcher::max_vector_size(bt);
+ }
+ 
+-bool Matcher::match_rule_supported_superword(int opcode, int vlen, BasicType bt) {
++bool Matcher::match_rule_supported_auto_vectorization(int opcode, int vlen, BasicType bt) {
+   return match_rule_supported_vector(opcode, vlen, bt);
+ }
+ 
+@@ -1838,28 +1813,27 @@ bool Matcher::pd_clone_address_expressions(AddPNode* m, Matcher::MStack& mstack,
+ encode %{
+   enc_class enc_untested %{
+ #ifdef ASSERT
+-    C2_MacroAssembler _masm(&cbuf);
+     __ untested("encoding");
+ #endif
+   %}
+ 
+   enc_class form3_mem_reg( memory mem, iRegI dst ) %{
+-    emit_form3_mem_reg(cbuf, ra_, this, $primary, $tertiary,
++    emit_form3_mem_reg(masm, ra_, this, $primary, $tertiary,
+                        $mem$$base, $mem$$disp, $mem$$index, $dst$$reg);
+   %}
+ 
+   enc_class simple_form3_mem_reg( memory mem, iRegI dst ) %{
+-    emit_form3_mem_reg(cbuf, ra_, this, $primary, -1,
++    emit_form3_mem_reg(masm, ra_, this, $primary, -1,
+                        $mem$$base, $mem$$disp, $mem$$index, $dst$$reg);
+   %}
+ 
+   enc_class form3_mem_prefetch_read( memory mem ) %{
+-    emit_form3_mem_reg(cbuf, ra_, this, $primary, -1,
++    emit_form3_mem_reg(masm, ra_, this, $primary, -1,
+                        $mem$$base, $mem$$disp, $mem$$index, 0/*prefetch function many-reads*/);
+   %}
+ 
+   enc_class form3_mem_prefetch_write( memory mem ) %{
+-    emit_form3_mem_reg(cbuf, ra_, this, $primary, -1,
++    emit_form3_mem_reg(masm, ra_, this, $primary, -1,
+                        $mem$$base, $mem$$disp, $mem$$index, 2/*prefetch function many-writes*/);
+   %}
+ 
+@@ -1867,10 +1841,10 @@ encode %{
+     assert(Assembler::is_simm13($mem$$disp  ), "need disp and disp+4");
+     assert(Assembler::is_simm13($mem$$disp+4), "need disp and disp+4");
+     guarantee($mem$$index == R_G0_enc, "double index?");
+-    emit_form3_mem_reg(cbuf, ra_, this, $primary, -1, $mem$$base, $mem$$disp+4, R_G0_enc, R_O7_enc );
+-    emit_form3_mem_reg(cbuf, ra_, this, $primary, -1, $mem$$base, $mem$$disp,   R_G0_enc, $reg$$reg );
+-    emit3_simm13( cbuf, Assembler::arith_op, $reg$$reg, Assembler::sllx_op3, $reg$$reg, 0x1020 );
+-    emit3( cbuf, Assembler::arith_op, $reg$$reg, Assembler::or_op3, $reg$$reg, 0, R_O7_enc );
++    emit_form3_mem_reg(masm, ra_, this, $primary, -1, $mem$$base, $mem$$disp+4, R_G0_enc, R_O7_enc );
++    emit_form3_mem_reg(masm, ra_, this, $primary, -1, $mem$$base, $mem$$disp,   R_G0_enc, $reg$$reg );
++    emit3_simm13( masm, Assembler::arith_op, $reg$$reg, Assembler::sllx_op3, $reg$$reg, 0x1020 );
++    emit3( masm, Assembler::arith_op, $reg$$reg, Assembler::or_op3, $reg$$reg, 0, R_O7_enc );
+   %}
+ 
+   enc_class form3_mem_reg_double_unaligned( memory mem, RegD_low reg ) %{
+@@ -1878,102 +1852,101 @@ encode %{
+     assert(Assembler::is_simm13($mem$$disp+4), "need disp and disp+4");
+     guarantee($mem$$index == R_G0_enc, "double index?");
+     // Load long with 2 instructions
+-    emit_form3_mem_reg(cbuf, ra_, this, $primary, -1, $mem$$base, $mem$$disp,   R_G0_enc, $reg$$reg+0 );
+-    emit_form3_mem_reg(cbuf, ra_, this, $primary, -1, $mem$$base, $mem$$disp+4, R_G0_enc, $reg$$reg+1 );
++    emit_form3_mem_reg(masm, ra_, this, $primary, -1, $mem$$base, $mem$$disp,   R_G0_enc, $reg$$reg+0 );
++    emit_form3_mem_reg(masm, ra_, this, $primary, -1, $mem$$base, $mem$$disp+4, R_G0_enc, $reg$$reg+1 );
+   %}
+ 
+   //%%% form3_mem_plus_4_reg is a hack--get rid of it
+   enc_class form3_mem_plus_4_reg( memory mem, iRegI dst ) %{
+     guarantee($mem$$disp, "cannot offset a reg-reg operand by 4");
+-    emit_form3_mem_reg(cbuf, ra_, this, $primary, -1, $mem$$base, $mem$$disp + 4, $mem$$index, $dst$$reg);
++    emit_form3_mem_reg(masm, ra_, this, $primary, -1, $mem$$base, $mem$$disp + 4, $mem$$index, $dst$$reg);
+   %}
+ 
+   enc_class form3_g0_rs2_rd_move( iRegI rs2, iRegI rd ) %{
+     // Encode a reg-reg copy.  If it is useless, then empty encoding.
+     if( $rs2$$reg != $rd$$reg )
+-      emit3( cbuf, Assembler::arith_op, $rd$$reg, Assembler::or_op3, 0, 0, $rs2$$reg );
++      emit3( masm, Assembler::arith_op, $rd$$reg, Assembler::or_op3, 0, 0, $rs2$$reg );
+   %}
+ 
+   // Target lo half of long
+   enc_class form3_g0_rs2_rd_move_lo( iRegI rs2, iRegL rd ) %{
+     // Encode a reg-reg copy.  If it is useless, then empty encoding.
+     if( $rs2$$reg != LONG_LO_REG($rd$$reg) )
+-      emit3( cbuf, Assembler::arith_op, LONG_LO_REG($rd$$reg), Assembler::or_op3, 0, 0, $rs2$$reg );
++      emit3( masm, Assembler::arith_op, LONG_LO_REG($rd$$reg), Assembler::or_op3, 0, 0, $rs2$$reg );
+   %}
+ 
+   // Source lo half of long
+   enc_class form3_g0_rs2_rd_move_lo2( iRegL rs2, iRegI rd ) %{
+     // Encode a reg-reg copy.  If it is useless, then empty encoding.
+     if( LONG_LO_REG($rs2$$reg) != $rd$$reg )
+-      emit3( cbuf, Assembler::arith_op, $rd$$reg, Assembler::or_op3, 0, 0, LONG_LO_REG($rs2$$reg) );
++      emit3( masm, Assembler::arith_op, $rd$$reg, Assembler::or_op3, 0, 0, LONG_LO_REG($rs2$$reg) );
+   %}
+ 
+   // Target hi half of long
+   enc_class form3_rs1_rd_copysign_hi( iRegI rs1, iRegL rd ) %{
+-    emit3_simm13( cbuf, Assembler::arith_op, $rd$$reg, Assembler::sra_op3, $rs1$$reg, 31 );
++    emit3_simm13( masm, Assembler::arith_op, $rd$$reg, Assembler::sra_op3, $rs1$$reg, 31 );
+   %}
+ 
+   // Source lo half of long, and leave it sign extended.
+   enc_class form3_rs1_rd_signextend_lo1( iRegL rs1, iRegI rd ) %{
+     // Sign extend low half
+-    emit3( cbuf, Assembler::arith_op, $rd$$reg, Assembler::sra_op3, $rs1$$reg, 0, 0 );
++    emit3( masm, Assembler::arith_op, $rd$$reg, Assembler::sra_op3, $rs1$$reg, 0, 0 );
+   %}
+ 
+   // Source hi half of long, and leave it sign extended.
+   enc_class form3_rs1_rd_copy_hi1( iRegL rs1, iRegI rd ) %{
+     // Shift high half to low half
+-    emit3_simm13( cbuf, Assembler::arith_op, $rd$$reg, Assembler::srlx_op3, $rs1$$reg, 32 );
++    emit3_simm13( masm, Assembler::arith_op, $rd$$reg, Assembler::srlx_op3, $rs1$$reg, 32 );
+   %}
+ 
+   // Source hi half of long
+   enc_class form3_g0_rs2_rd_move_hi2( iRegL rs2, iRegI rd ) %{
+     // Encode a reg-reg copy.  If it is useless, then empty encoding.
+     if( LONG_HI_REG($rs2$$reg) != $rd$$reg )
+-      emit3( cbuf, Assembler::arith_op, $rd$$reg, Assembler::or_op3, 0, 0, LONG_HI_REG($rs2$$reg) );
++      emit3( masm, Assembler::arith_op, $rd$$reg, Assembler::or_op3, 0, 0, LONG_HI_REG($rs2$$reg) );
+   %}
+ 
+   enc_class form3_rs1_rs2_rd( iRegI rs1, iRegI rs2, iRegI rd ) %{
+-    emit3( cbuf, $secondary, $rd$$reg, $primary, $rs1$$reg, 0, $rs2$$reg );
++    emit3( masm, $secondary, $rd$$reg, $primary, $rs1$$reg, 0, $rs2$$reg );
+   %}
+ 
+   enc_class enc_to_bool( iRegI src, iRegI dst ) %{
+-    emit3       ( cbuf, Assembler::arith_op,         0, Assembler::subcc_op3, 0, 0, $src$$reg );
+-    emit3_simm13( cbuf, Assembler::arith_op, $dst$$reg, Assembler::addc_op3 , 0, 0 );
++    emit3       ( masm, Assembler::arith_op,         0, Assembler::subcc_op3, 0, 0, $src$$reg );
++    emit3_simm13( masm, Assembler::arith_op, $dst$$reg, Assembler::addc_op3 , 0, 0 );
+   %}
+ 
+   enc_class enc_ltmask( iRegI p, iRegI q, iRegI dst ) %{
+-    emit3       ( cbuf, Assembler::arith_op,         0, Assembler::subcc_op3, $p$$reg, 0, $q$$reg );
++    emit3       ( masm, Assembler::arith_op,         0, Assembler::subcc_op3, $p$$reg, 0, $q$$reg );
+     // clear if nothing else is happening
+-    emit3_simm13( cbuf, Assembler::arith_op, $dst$$reg, Assembler::or_op3, 0,  0 );
++    emit3_simm13( masm, Assembler::arith_op, $dst$$reg, Assembler::or_op3, 0,  0 );
+     // blt,a,pn done
+-    emit2_19    ( cbuf, Assembler::branch_op, 1/*annul*/, Assembler::less, Assembler::bp_op2, Assembler::icc, 0/*predict not taken*/, 2 );
++    emit2_19    ( masm, Assembler::branch_op, 1/*annul*/, Assembler::less, Assembler::bp_op2, Assembler::icc, 0/*predict not taken*/, 2 );
+     // mov dst,-1 in delay slot
+-    emit3_simm13( cbuf, Assembler::arith_op, $dst$$reg, Assembler::or_op3, 0, -1 );
++    emit3_simm13( masm, Assembler::arith_op, $dst$$reg, Assembler::or_op3, 0, -1 );
+   %}
+ 
+   enc_class form3_rs1_imm5_rd( iRegI rs1, immU5 imm5, iRegI rd ) %{
+-    emit3_simm13( cbuf, $secondary, $rd$$reg, $primary, $rs1$$reg, $imm5$$constant & 0x1F );
++    emit3_simm13( masm, $secondary, $rd$$reg, $primary, $rs1$$reg, $imm5$$constant & 0x1F );
+   %}
+ 
+   enc_class form3_sd_rs1_imm6_rd( iRegL rs1, immU6 imm6, iRegL rd ) %{
+-    emit3_simm13( cbuf, $secondary, $rd$$reg, $primary, $rs1$$reg, ($imm6$$constant & 0x3F) | 0x1000 );
++    emit3_simm13( masm, $secondary, $rd$$reg, $primary, $rs1$$reg, ($imm6$$constant & 0x3F) | 0x1000 );
+   %}
+ 
+   enc_class form3_sd_rs1_rs2_rd( iRegL rs1, iRegI rs2, iRegL rd ) %{
+-    emit3( cbuf, $secondary, $rd$$reg, $primary, $rs1$$reg, 0x80, $rs2$$reg );
++    emit3( masm, $secondary, $rd$$reg, $primary, $rs1$$reg, 0x80, $rs2$$reg );
+   %}
+ 
+   enc_class form3_rs1_simm13_rd( iRegI rs1, immI13 simm13, iRegI rd ) %{
+-    emit3_simm13( cbuf, $secondary, $rd$$reg, $primary, $rs1$$reg, $simm13$$constant );
++    emit3_simm13( masm, $secondary, $rd$$reg, $primary, $rs1$$reg, $simm13$$constant );
+   %}
+ 
+   enc_class move_return_pc_to_o1() %{
+-    emit3_simm13( cbuf, Assembler::arith_op, R_O1_enc, Assembler::add_op3, R_O7_enc, frame::pc_return_offset );
++    emit3_simm13( masm, Assembler::arith_op, R_O1_enc, Assembler::add_op3, R_O7_enc, frame::pc_return_offset );
+   %}
+ 
+   /* %%% merge with enc_to_bool */
+   enc_class enc_convP2B( iRegI dst, iRegP src ) %{
+-    C2_MacroAssembler _masm(&cbuf);
+ 
+     Register   src_reg = reg_to_register_object($src$$reg);
+     Register   dst_reg = reg_to_register_object($dst$$reg);
+@@ -1982,7 +1955,6 @@ encode %{
+ 
+   enc_class enc_cadd_cmpLTMask( iRegI p, iRegI q, iRegI y, iRegI tmp ) %{
+     // (Set p (AddI (AndI (CmpLTMask p q) y) (SubI p q)))
+-    C2_MacroAssembler _masm(&cbuf);
+ 
+     Register   p_reg = reg_to_register_object($p$$reg);
+     Register   q_reg = reg_to_register_object($q$$reg);
+@@ -1996,145 +1968,142 @@ encode %{
+ 
+   enc_class form_d2i_helper(regD src, regF dst) %{
+     // fcmp %fcc0,$src,$src
+-    emit3( cbuf, Assembler::arith_op , Assembler::fcc0, Assembler::fpop2_op3, $src$$reg, Assembler::fcmpd_opf, $src$$reg );
++    emit3( masm, Assembler::arith_op , Assembler::fcc0, Assembler::fpop2_op3, $src$$reg, Assembler::fcmpd_opf, $src$$reg );
+     // branch %fcc0 not-nan, predict taken
+-    emit2_19( cbuf, Assembler::branch_op, 0/*annul*/, Assembler::f_ordered, Assembler::fbp_op2, Assembler::fcc0, 1/*predict taken*/, 4 );
++    emit2_19( masm, Assembler::branch_op, 0/*annul*/, Assembler::f_ordered, Assembler::fbp_op2, Assembler::fcc0, 1/*predict taken*/, 4 );
+     // fdtoi $src,$dst
+-    emit3( cbuf, Assembler::arith_op , $dst$$reg, Assembler::fpop1_op3,         0, Assembler::fdtoi_opf, $src$$reg );
++    emit3( masm, Assembler::arith_op , $dst$$reg, Assembler::fpop1_op3,         0, Assembler::fdtoi_opf, $src$$reg );
+     // fitos $dst,$dst (if nan)
+-    emit3( cbuf, Assembler::arith_op , $dst$$reg, Assembler::fpop1_op3,         0, Assembler::fitos_opf, $dst$$reg );
++    emit3( masm, Assembler::arith_op , $dst$$reg, Assembler::fpop1_op3,         0, Assembler::fitos_opf, $dst$$reg );
+     // clear $dst (if nan)
+-    emit3( cbuf, Assembler::arith_op , $dst$$reg, Assembler::fpop1_op3, $dst$$reg, Assembler::fsubs_opf, $dst$$reg );
++    emit3( masm, Assembler::arith_op , $dst$$reg, Assembler::fpop1_op3, $dst$$reg, Assembler::fsubs_opf, $dst$$reg );
+     // carry on here...
+   %}
+ 
+   enc_class form_d2l_helper(regD src, regD dst) %{
+     // fcmp %fcc0,$src,$src  check for NAN
+-    emit3( cbuf, Assembler::arith_op , Assembler::fcc0, Assembler::fpop2_op3, $src$$reg, Assembler::fcmpd_opf, $src$$reg );
++    emit3( masm, Assembler::arith_op , Assembler::fcc0, Assembler::fpop2_op3, $src$$reg, Assembler::fcmpd_opf, $src$$reg );
+     // branch %fcc0 not-nan, predict taken
+-    emit2_19( cbuf, Assembler::branch_op, 0/*annul*/, Assembler::f_ordered, Assembler::fbp_op2, Assembler::fcc0, 1/*predict taken*/, 4 );
++    emit2_19( masm, Assembler::branch_op, 0/*annul*/, Assembler::f_ordered, Assembler::fbp_op2, Assembler::fcc0, 1/*predict taken*/, 4 );
+     // fdtox $src,$dst   convert in delay slot
+-    emit3( cbuf, Assembler::arith_op , $dst$$reg, Assembler::fpop1_op3,         0, Assembler::fdtox_opf, $src$$reg );
++    emit3( masm, Assembler::arith_op , $dst$$reg, Assembler::fpop1_op3,         0, Assembler::fdtox_opf, $src$$reg );
+     // fxtod $dst,$dst  (if nan)
+-    emit3( cbuf, Assembler::arith_op , $dst$$reg, Assembler::fpop1_op3,         0, Assembler::fxtod_opf, $dst$$reg );
++    emit3( masm, Assembler::arith_op , $dst$$reg, Assembler::fpop1_op3,         0, Assembler::fxtod_opf, $dst$$reg );
+     // clear $dst (if nan)
+-    emit3( cbuf, Assembler::arith_op , $dst$$reg, Assembler::fpop1_op3, $dst$$reg, Assembler::fsubd_opf, $dst$$reg );
++    emit3( masm, Assembler::arith_op , $dst$$reg, Assembler::fpop1_op3, $dst$$reg, Assembler::fsubd_opf, $dst$$reg );
+     // carry on here...
+   %}
+ 
+   enc_class form_f2i_helper(regF src, regF dst) %{
+     // fcmps %fcc0,$src,$src
+-    emit3( cbuf, Assembler::arith_op , Assembler::fcc0, Assembler::fpop2_op3, $src$$reg, Assembler::fcmps_opf, $src$$reg );
++    emit3( masm, Assembler::arith_op , Assembler::fcc0, Assembler::fpop2_op3, $src$$reg, Assembler::fcmps_opf, $src$$reg );
+     // branch %fcc0 not-nan, predict taken
+-    emit2_19( cbuf, Assembler::branch_op, 0/*annul*/, Assembler::f_ordered, Assembler::fbp_op2, Assembler::fcc0, 1/*predict taken*/, 4 );
++    emit2_19( masm, Assembler::branch_op, 0/*annul*/, Assembler::f_ordered, Assembler::fbp_op2, Assembler::fcc0, 1/*predict taken*/, 4 );
+     // fstoi $src,$dst
+-    emit3( cbuf, Assembler::arith_op , $dst$$reg, Assembler::fpop1_op3,         0, Assembler::fstoi_opf, $src$$reg );
++    emit3( masm, Assembler::arith_op , $dst$$reg, Assembler::fpop1_op3,         0, Assembler::fstoi_opf, $src$$reg );
+     // fitos $dst,$dst (if nan)
+-    emit3( cbuf, Assembler::arith_op , $dst$$reg, Assembler::fpop1_op3,         0, Assembler::fitos_opf, $dst$$reg );
++    emit3( masm, Assembler::arith_op , $dst$$reg, Assembler::fpop1_op3,         0, Assembler::fitos_opf, $dst$$reg );
+     // clear $dst (if nan)
+-    emit3( cbuf, Assembler::arith_op , $dst$$reg, Assembler::fpop1_op3, $dst$$reg, Assembler::fsubs_opf, $dst$$reg );
++    emit3( masm, Assembler::arith_op , $dst$$reg, Assembler::fpop1_op3, $dst$$reg, Assembler::fsubs_opf, $dst$$reg );
+     // carry on here...
+   %}
+ 
+   enc_class form_f2l_helper(regF src, regD dst) %{
+     // fcmps %fcc0,$src,$src
+-    emit3( cbuf, Assembler::arith_op , Assembler::fcc0, Assembler::fpop2_op3, $src$$reg, Assembler::fcmps_opf, $src$$reg );
++    emit3( masm, Assembler::arith_op , Assembler::fcc0, Assembler::fpop2_op3, $src$$reg, Assembler::fcmps_opf, $src$$reg );
+     // branch %fcc0 not-nan, predict taken
+-    emit2_19( cbuf, Assembler::branch_op, 0/*annul*/, Assembler::f_ordered, Assembler::fbp_op2, Assembler::fcc0, 1/*predict taken*/, 4 );
++    emit2_19( masm, Assembler::branch_op, 0/*annul*/, Assembler::f_ordered, Assembler::fbp_op2, Assembler::fcc0, 1/*predict taken*/, 4 );
+     // fstox $src,$dst
+-    emit3( cbuf, Assembler::arith_op , $dst$$reg, Assembler::fpop1_op3,         0, Assembler::fstox_opf, $src$$reg );
++    emit3( masm, Assembler::arith_op , $dst$$reg, Assembler::fpop1_op3,         0, Assembler::fstox_opf, $src$$reg );
+     // fxtod $dst,$dst (if nan)
+-    emit3( cbuf, Assembler::arith_op , $dst$$reg, Assembler::fpop1_op3,         0, Assembler::fxtod_opf, $dst$$reg );
++    emit3( masm, Assembler::arith_op , $dst$$reg, Assembler::fpop1_op3,         0, Assembler::fxtod_opf, $dst$$reg );
+     // clear $dst (if nan)
+-    emit3( cbuf, Assembler::arith_op , $dst$$reg, Assembler::fpop1_op3, $dst$$reg, Assembler::fsubd_opf, $dst$$reg );
++    emit3( masm, Assembler::arith_op , $dst$$reg, Assembler::fpop1_op3, $dst$$reg, Assembler::fsubd_opf, $dst$$reg );
+     // carry on here...
+   %}
+ 
+-  enc_class form3_opf_rs2F_rdF(regF rs2, regF rd) %{ emit3(cbuf,$secondary,$rd$$reg,$primary,0,$tertiary,$rs2$$reg); %}
+-  enc_class form3_opf_rs2F_rdD(regF rs2, regD rd) %{ emit3(cbuf,$secondary,$rd$$reg,$primary,0,$tertiary,$rs2$$reg); %}
+-  enc_class form3_opf_rs2D_rdF(regD rs2, regF rd) %{ emit3(cbuf,$secondary,$rd$$reg,$primary,0,$tertiary,$rs2$$reg); %}
+-  enc_class form3_opf_rs2D_rdD(regD rs2, regD rd) %{ emit3(cbuf,$secondary,$rd$$reg,$primary,0,$tertiary,$rs2$$reg); %}
++  enc_class form3_opf_rs2F_rdF(regF rs2, regF rd) %{ emit3(masm,$secondary,$rd$$reg,$primary,0,$tertiary,$rs2$$reg); %}
++  enc_class form3_opf_rs2F_rdD(regF rs2, regD rd) %{ emit3(masm,$secondary,$rd$$reg,$primary,0,$tertiary,$rs2$$reg); %}
++  enc_class form3_opf_rs2D_rdF(regD rs2, regF rd) %{ emit3(masm,$secondary,$rd$$reg,$primary,0,$tertiary,$rs2$$reg); %}
++  enc_class form3_opf_rs2D_rdD(regD rs2, regD rd) %{ emit3(masm,$secondary,$rd$$reg,$primary,0,$tertiary,$rs2$$reg); %}
+ 
+-  enc_class form3_opf_rs2D_lo_rdF(regD rs2, regF rd) %{ emit3(cbuf,$secondary,$rd$$reg,$primary,0,$tertiary,$rs2$$reg+1); %}
++  enc_class form3_opf_rs2D_lo_rdF(regD rs2, regF rd) %{ emit3(masm,$secondary,$rd$$reg,$primary,0,$tertiary,$rs2$$reg+1); %}
+ 
+-  enc_class form3_opf_rs2D_hi_rdD_hi(regD rs2, regD rd) %{ emit3(cbuf,$secondary,$rd$$reg,$primary,0,$tertiary,$rs2$$reg); %}
+-  enc_class form3_opf_rs2D_lo_rdD_lo(regD rs2, regD rd) %{ emit3(cbuf,$secondary,$rd$$reg+1,$primary,0,$tertiary,$rs2$$reg+1); %}
++  enc_class form3_opf_rs2D_hi_rdD_hi(regD rs2, regD rd) %{ emit3(masm,$secondary,$rd$$reg,$primary,0,$tertiary,$rs2$$reg); %}
++  enc_class form3_opf_rs2D_lo_rdD_lo(regD rs2, regD rd) %{ emit3(masm,$secondary,$rd$$reg+1,$primary,0,$tertiary,$rs2$$reg+1); %}
+ 
+   enc_class form3_opf_rs1F_rs2F_rdF( regF rs1, regF rs2, regF rd ) %{
+-    emit3( cbuf, $secondary, $rd$$reg, $primary, $rs1$$reg, $tertiary, $rs2$$reg );
++    emit3( masm, $secondary, $rd$$reg, $primary, $rs1$$reg, $tertiary, $rs2$$reg );
+   %}
+ 
+   enc_class form3_opf_rs1D_rs2D_rdD( regD rs1, regD rs2, regD rd ) %{
+-    emit3( cbuf, $secondary, $rd$$reg, $primary, $rs1$$reg, $tertiary, $rs2$$reg );
++    emit3( masm, $secondary, $rd$$reg, $primary, $rs1$$reg, $tertiary, $rs2$$reg );
+   %}
+ 
+   enc_class form3_opf_rs1F_rs2F_fcc( regF rs1, regF rs2, flagsRegF fcc ) %{
+-    emit3( cbuf, $secondary, $fcc$$reg, $primary, $rs1$$reg, $tertiary, $rs2$$reg );
++    emit3( masm, $secondary, $fcc$$reg, $primary, $rs1$$reg, $tertiary, $rs2$$reg );
+   %}
+ 
+   enc_class form3_opf_rs1D_rs2D_fcc( regD rs1, regD rs2, flagsRegF fcc ) %{
+-    emit3( cbuf, $secondary, $fcc$$reg, $primary, $rs1$$reg, $tertiary, $rs2$$reg );
++    emit3( masm, $secondary, $fcc$$reg, $primary, $rs1$$reg, $tertiary, $rs2$$reg );
+   %}
+ 
+   enc_class form3_convI2F(regF rs2, regF rd) %{
+-    emit3(cbuf,Assembler::arith_op,$rd$$reg,Assembler::fpop1_op3,0,$secondary,$rs2$$reg);
++    emit3(masm,Assembler::arith_op,$rd$$reg,Assembler::fpop1_op3,0,$secondary,$rs2$$reg);
+   %}
+ 
+   // Encloding class for traceable jumps
+   enc_class form_jmpl(g3RegP dest) %{
+-    emit_jmpl(cbuf, $dest$$reg);
++    emit_jmpl(masm, $dest$$reg);
+   %}
+ 
+   enc_class form_jmpl_set_exception_pc(g1RegP dest) %{
+-    emit_jmpl_set_exception_pc(cbuf, $dest$$reg);
++    emit_jmpl_set_exception_pc(masm, $dest$$reg);
+   %}
+ 
+   enc_class form2_nop() %{
+-    emit_nop(cbuf);
++    emit_nop(masm);
+   %}
+ 
+   enc_class form2_illtrap() %{
+-    emit_illtrap(cbuf);
++    emit_illtrap(masm);
+   %}
+ 
+ 
+   // Compare longs and convert into -1, 0, 1.
+   enc_class cmpl_flag( iRegL src1, iRegL src2, iRegI dst ) %{
+     // CMP $src1,$src2
+-    emit3( cbuf, Assembler::arith_op, 0, Assembler::subcc_op3, $src1$$reg, 0, $src2$$reg );
++    emit3( masm, Assembler::arith_op, 0, Assembler::subcc_op3, $src1$$reg, 0, $src2$$reg );
+     // blt,a,pn done
+-    emit2_19( cbuf, Assembler::branch_op, 1/*annul*/, Assembler::less   , Assembler::bp_op2, Assembler::xcc, 0/*predict not taken*/, 5 );
++    emit2_19( masm, Assembler::branch_op, 1/*annul*/, Assembler::less   , Assembler::bp_op2, Assembler::xcc, 0/*predict not taken*/, 5 );
+     // mov dst,-1 in delay slot
+-    emit3_simm13( cbuf, Assembler::arith_op, $dst$$reg, Assembler::or_op3, 0, -1 );
++    emit3_simm13( masm, Assembler::arith_op, $dst$$reg, Assembler::or_op3, 0, -1 );
+     // bgt,a,pn done
+-    emit2_19( cbuf, Assembler::branch_op, 1/*annul*/, Assembler::greater, Assembler::bp_op2, Assembler::xcc, 0/*predict not taken*/, 3 );
++    emit2_19( masm, Assembler::branch_op, 1/*annul*/, Assembler::greater, Assembler::bp_op2, Assembler::xcc, 0/*predict not taken*/, 3 );
+     // mov dst,1 in delay slot
+-    emit3_simm13( cbuf, Assembler::arith_op, $dst$$reg, Assembler::or_op3, 0,  1 );
++    emit3_simm13( masm, Assembler::arith_op, $dst$$reg, Assembler::or_op3, 0,  1 );
+     // CLR    $dst
+-    emit3( cbuf, Assembler::arith_op, $dst$$reg, Assembler::or_op3 , 0, 0, 0 );
++    emit3( masm, Assembler::arith_op, $dst$$reg, Assembler::or_op3 , 0, 0, 0 );
+   %}
+ 
+   enc_class enc_PartialSubtypeCheck() %{
+-    C2_MacroAssembler _masm(&cbuf);
+     __ call(StubRoutines::Sparc::partial_subtype_check(), relocInfo::runtime_call_type);
+     __ delayed()->nop();
+   %}
+ 
+   enc_class enc_bp( label labl, cmpOp cmp, flagsReg cc ) %{
+-    C2_MacroAssembler _masm(&cbuf);
+     Label* L = $labl$$label;
+     Assembler::Predict predict_taken =
+-      cbuf.is_backward_branch(*L) ? Assembler::pt : Assembler::pn;
++      masm->code()->is_backward_branch(*L) ? Assembler::pt : Assembler::pn;
+ 
+     __ bp( (Assembler::Condition)($cmp$$cmpcode), false, Assembler::icc, predict_taken, *L);
+     __ delayed()->nop();
+   %}
+ 
+   enc_class enc_bpr( label labl, cmpOp_reg cmp, iRegI op1 ) %{
+-    C2_MacroAssembler _masm(&cbuf);
+     Label* L = $labl$$label;
+     Assembler::Predict predict_taken =
+-      cbuf.is_backward_branch(*L) ? Assembler::pt : Assembler::pn;
++      masm->code()->is_backward_branch(*L) ? Assembler::pt : Assembler::pn;
+ 
+     __ bpr( (Assembler::RCondition)($cmp$$cmpcode), false, predict_taken, as_Register($op1$$reg), *L);
+     __ delayed()->nop();
+@@ -2149,7 +2118,7 @@ encode %{
+              (0 << 13) |                    // select register move
+              ($pcc$$constant << 11) |       // cc1, cc0 bits for 'icc' or 'xcc'
+              ($src$$reg << 0);
+-    cbuf.insts()->emit_int32(op);
++    masm->code()->insts()->emit_int32(op);
+   %}
+ 
+   enc_class enc_cmov_imm( cmpOp cmp, iRegI dst, immI11 src, immI pcc ) %{
+@@ -2162,7 +2131,7 @@ encode %{
+              (1 << 13) |                    // select immediate move
+              ($pcc$$constant << 11) |       // cc1, cc0 bits for 'icc'
+              (simm11 << 0);
+-    cbuf.insts()->emit_int32(op);
++    masm->code()->insts()->emit_int32(op);
+   %}
+ 
+   enc_class enc_cmov_reg_f( cmpOpF cmp, iRegI dst, iRegI src, flagsRegF fcc ) %{
+@@ -2174,7 +2143,7 @@ encode %{
+              (0 << 13) |                    // select register move
+              ($fcc$$reg << 11) |            // cc1, cc0 bits for fcc0-fcc3
+              ($src$$reg << 0);
+-    cbuf.insts()->emit_int32(op);
++    masm->code()->insts()->emit_int32(op);
+   %}
+ 
+   enc_class enc_cmov_imm_f( cmpOp cmp, iRegI dst, immI11 src, flagsRegF fcc ) %{
+@@ -2187,7 +2156,7 @@ encode %{
+              (1 << 13) |                    // select immediate move
+              ($fcc$$reg << 11) |            // cc1, cc0 bits for fcc0-fcc3
+              (simm11 << 0);
+-    cbuf.insts()->emit_int32(op);
++    masm->code()->insts()->emit_int32(op);
+   %}
+ 
+   enc_class enc_cmovf_reg( cmpOp cmp, regD dst, regD src, immI pcc ) %{
+@@ -2200,7 +2169,7 @@ encode %{
+              ($pcc$$constant << 11) |       // cc1-cc0 bits for 'icc' or 'xcc'
+              ($primary << 5) |              // select single, double or quad
+              ($src$$reg << 0);
+-    cbuf.insts()->emit_int32(op);
++    masm->code()->insts()->emit_int32(op);
+   %}
+ 
+   enc_class enc_cmovff_reg( cmpOpF cmp, flagsRegF fcc, regD dst, regD src ) %{
+@@ -2212,7 +2181,7 @@ encode %{
+              ($fcc$$reg << 11) |            // cc2-cc0 bits for 'fccX'
+              ($primary << 5) |              // select single, double or quad
+              ($src$$reg << 0);
+-    cbuf.insts()->emit_int32(op);
++    masm->code()->insts()->emit_int32(op);
+   %}
+ 
+   // Used by the MIN/MAX encodings.  Same as a CMOV, but
+@@ -2226,7 +2195,7 @@ encode %{
+              (0 << 13) |                    // select register move
+              (0 << 11) |                    // cc1, cc0 bits for 'icc'
+              ($src$$reg << 0);
+-    cbuf.insts()->emit_int32(op);
++    masm->code()->insts()->emit_int32(op);
+   %}
+ 
+   enc_class enc_cmov_reg_minmax_long( iRegL dst, iRegL src ) %{
+@@ -2238,25 +2207,23 @@ encode %{
+              (0 << 13) |                    // select register move
+              (0 << 11) |                    // cc1, cc0 bits for 'icc'
+              ($src$$reg << 0);
+-    cbuf.insts()->emit_int32(op);
++    masm->code()->insts()->emit_int32(op);
+   %}
+ 
+   enc_class Set13( immI13 src, iRegI rd ) %{
+-    emit3_simm13( cbuf, Assembler::arith_op, $rd$$reg, Assembler::or_op3, 0, $src$$constant );
++    emit3_simm13( masm, Assembler::arith_op, $rd$$reg, Assembler::or_op3, 0, $src$$constant );
+   %}
+ 
+   enc_class SetHi22( immI src, iRegI rd ) %{
+-    emit2_22( cbuf, Assembler::branch_op, $rd$$reg, Assembler::sethi_op2, $src$$constant );
++    emit2_22( masm, Assembler::branch_op, $rd$$reg, Assembler::sethi_op2, $src$$constant );
+   %}
+ 
+   enc_class Set32( immI src, iRegI rd ) %{
+-    C2_MacroAssembler _masm(&cbuf);
+     __ set($src$$constant, reg_to_register_object($rd$$reg));
+   %}
+ 
+   enc_class call_epilog %{
+     if( VerifyStackAtCalls ) {
+-      C2_MacroAssembler _masm(&cbuf);
+       int framesize = ra_->C->output()->frame_size_in_bytes();
+       Register temp_reg = G3;
+       __ add(SP, framesize, temp_reg);
+@@ -2274,16 +2241,14 @@ encode %{
+   enc_class Java_To_Runtime (method meth) %{    // CALL Java_To_Runtime
+     // CALL directly to the runtime
+     // The user of this is responsible for ensuring that R_L7 is empty (killed).
+-    emit_call_reloc(cbuf, $meth$$method, runtime_call_Relocation::spec(), /*preserve_g2=*/true);
++    emit_call_reloc(masm, $meth$$method, runtime_call_Relocation::spec(), /*preserve_g2=*/true);
+   %}
+ 
+   enc_class preserve_SP %{
+-    C2_MacroAssembler _masm(&cbuf);
+     __ mov(SP, L7_mh_SP_save);
+   %}
+ 
+   enc_class restore_SP %{
+-    C2_MacroAssembler _masm(&cbuf);
+     __ mov(L7_mh_SP_save, SP);
+   %}
+ 
+@@ -2291,15 +2256,15 @@ encode %{
+     // CALL to fixup routine.  Fixup routine uses ScopeDesc info to determine
+     // who we intended to call.
+     if (!_method) {
+-      emit_call_reloc(cbuf, $meth$$method, runtime_call_Relocation::spec());
++      emit_call_reloc(masm, $meth$$method, runtime_call_Relocation::spec());
+     } else {
+-      int method_index = resolved_method_index(cbuf);
++      int method_index = resolved_method_index(masm);
+       RelocationHolder rspec = _optimized_virtual ? opt_virtual_call_Relocation::spec(method_index)
+                                                   : static_call_Relocation::spec(method_index);
+-      emit_call_reloc(cbuf, $meth$$method, rspec);
++      emit_call_reloc(masm, $meth$$method, rspec);
+ 
+       // Emit stub for static call.
+-      address stub = CompiledStaticCall::emit_to_interp_stub(cbuf);
++      address stub = CompiledDirectCall::emit_to_interp_stub(masm);
+       if (stub == NULL) {
+         ciEnv::current()->record_failure("CodeCache is full");
+         return;
+@@ -2308,7 +2273,6 @@ encode %{
+   %}
+ 
+   enc_class Java_Dynamic_Call (method meth) %{    // JAVA DYNAMIC CALL
+-    C2_MacroAssembler _masm(&cbuf);
+     __ set_inst_mark();
+     int vtable_index = this->_vtable_index;
+     // MachCallDynamicJavaNode::ret_addr_offset uses this same test
+@@ -2318,7 +2282,7 @@ encode %{
+       Register G5_ic_reg = reg_to_register_object(Matcher::inline_cache_reg_encode());
+       assert(G5_ic_reg == G5_inline_cache_reg, "G5_inline_cache_reg used in assemble_ic_buffer_code()");
+       assert(G5_ic_reg == G5_megamorphic_method, "G5_megamorphic_method used in megamorphic call stub");
+-      __ ic_call((address)$meth$$method, /*emit_delay=*/true, resolved_method_index(cbuf));
++      __ ic_call((address)$meth$$method, /*emit_delay=*/true, resolved_method_index(masm));
+     } else {
+       assert(!UseInlineCaches, "expect vtable calls only if not using ICs");
+       // Just go thru the vtable
+@@ -2357,7 +2321,6 @@ encode %{
+   %}
+ 
+   enc_class Java_Compiled_Call (method meth) %{    // JAVA COMPILED CALL
+-    C2_MacroAssembler _masm(&cbuf);
+ 
+     Register G5_ic_reg = reg_to_register_object(Matcher::inline_cache_reg_encode());
+     Register temp_reg = G3;   // caller must kill G3!  We cannot reuse G5_ic_reg here because
+@@ -2374,7 +2337,6 @@ encode %{
+   %}
+ 
+ enc_class idiv_reg(iRegIsafe src1, iRegIsafe src2, iRegIsafe dst) %{
+-    C2_MacroAssembler _masm(&cbuf);
+     Register Rdividend = reg_to_register_object($src1$$reg);
+     Register Rdivisor = reg_to_register_object($src2$$reg);
+     Register Rresult = reg_to_register_object($dst$$reg);
+@@ -2385,7 +2347,6 @@ enc_class idiv_reg(iRegIsafe src1, iRegIsafe src2, iRegIsafe dst) %{
+ %}
+ 
+ enc_class idiv_imm(iRegIsafe src1, immI13 imm, iRegIsafe dst) %{
+-    C2_MacroAssembler _masm(&cbuf);
+ 
+     Register Rdividend = reg_to_register_object($src1$$reg);
+     int divisor = $imm$$constant;
+@@ -2396,7 +2357,6 @@ enc_class idiv_imm(iRegIsafe src1, immI13 imm, iRegIsafe dst) %{
+ %}
+ 
+ enc_class enc_mul_hi(iRegIsafe dst, iRegIsafe src1, iRegIsafe src2) %{
+-    C2_MacroAssembler _masm(&cbuf);
+     Register Rsrc1 = reg_to_register_object($src1$$reg);
+     Register Rsrc2 = reg_to_register_object($src2$$reg);
+     Register Rdst  = reg_to_register_object($dst$$reg);
+@@ -2408,7 +2368,6 @@ enc_class enc_mul_hi(iRegIsafe dst, iRegIsafe src1, iRegIsafe src2) %{
+ %}
+ 
+ enc_class irem_reg(iRegIsafe src1, iRegIsafe src2, iRegIsafe dst, o7RegL scratch) %{
+-    C2_MacroAssembler _masm(&cbuf);
+     Register Rdividend = reg_to_register_object($src1$$reg);
+     Register Rdivisor = reg_to_register_object($src2$$reg);
+     Register Rresult = reg_to_register_object($dst$$reg);
+@@ -2425,7 +2384,6 @@ enc_class irem_reg(iRegIsafe src1, iRegIsafe src2, iRegIsafe dst, o7RegL scratch
+ %}
+ 
+ enc_class irem_imm(iRegIsafe src1, immI13 imm, iRegIsafe dst, o7RegL scratch) %{
+-    C2_MacroAssembler _masm(&cbuf);
+ 
+     Register Rdividend = reg_to_register_object($src1$$reg);
+     int divisor = $imm$$constant;
+@@ -2441,7 +2399,6 @@ enc_class irem_imm(iRegIsafe src1, immI13 imm, iRegIsafe dst, o7RegL scratch) %{
+ %}
+ 
+ enc_class fabss (sflt_reg dst, sflt_reg src) %{
+-    C2_MacroAssembler _masm(&cbuf);
+ 
+     FloatRegister Fdst = reg_to_SingleFloatRegister_object($dst$$reg);
+     FloatRegister Fsrc = reg_to_SingleFloatRegister_object($src$$reg);
+@@ -2450,7 +2407,6 @@ enc_class fabss (sflt_reg dst, sflt_reg src) %{
+ %}
+ 
+ enc_class fabsd (dflt_reg dst, dflt_reg src) %{
+-    C2_MacroAssembler _masm(&cbuf);
+ 
+     FloatRegister Fdst = reg_to_DoubleFloatRegister_object($dst$$reg);
+     FloatRegister Fsrc = reg_to_DoubleFloatRegister_object($src$$reg);
+@@ -2459,7 +2415,6 @@ enc_class fabsd (dflt_reg dst, dflt_reg src) %{
+ %}
+ 
+ enc_class fnegd (dflt_reg dst, dflt_reg src) %{
+-    C2_MacroAssembler _masm(&cbuf);
+ 
+     FloatRegister Fdst = reg_to_DoubleFloatRegister_object($dst$$reg);
+     FloatRegister Fsrc = reg_to_DoubleFloatRegister_object($src$$reg);
+@@ -2468,7 +2423,6 @@ enc_class fnegd (dflt_reg dst, dflt_reg src) %{
+ %}
+ 
+ enc_class fsqrts (sflt_reg dst, sflt_reg src) %{
+-    C2_MacroAssembler _masm(&cbuf);
+ 
+     FloatRegister Fdst = reg_to_SingleFloatRegister_object($dst$$reg);
+     FloatRegister Fsrc = reg_to_SingleFloatRegister_object($src$$reg);
+@@ -2477,7 +2431,6 @@ enc_class fsqrts (sflt_reg dst, sflt_reg src) %{
+ %}
+ 
+ enc_class fsqrtd (dflt_reg dst, dflt_reg src) %{
+-    C2_MacroAssembler _masm(&cbuf);
+ 
+     FloatRegister Fdst = reg_to_DoubleFloatRegister_object($dst$$reg);
+     FloatRegister Fsrc = reg_to_DoubleFloatRegister_object($src$$reg);
+@@ -2487,7 +2440,6 @@ enc_class fsqrtd (dflt_reg dst, dflt_reg src) %{
+ 
+ 
+ enc_class fmadds (sflt_reg dst, sflt_reg a, sflt_reg b, sflt_reg c) %{
+-    C2_MacroAssembler _masm(&cbuf);
+ 
+     FloatRegister Frd = reg_to_SingleFloatRegister_object($dst$$reg);
+     FloatRegister Fra = reg_to_SingleFloatRegister_object($a$$reg);
+@@ -2498,7 +2450,6 @@ enc_class fmadds (sflt_reg dst, sflt_reg a, sflt_reg b, sflt_reg c) %{
+ %}
+ 
+ enc_class fmaddd (dflt_reg dst, dflt_reg a, dflt_reg b, dflt_reg c) %{
+-    C2_MacroAssembler _masm(&cbuf);
+ 
+     FloatRegister Frd = reg_to_DoubleFloatRegister_object($dst$$reg);
+     FloatRegister Fra = reg_to_DoubleFloatRegister_object($a$$reg);
+@@ -2509,7 +2460,6 @@ enc_class fmaddd (dflt_reg dst, dflt_reg a, dflt_reg b, dflt_reg c) %{
+ %}
+ 
+ enc_class fmsubs (sflt_reg dst, sflt_reg a, sflt_reg b, sflt_reg c) %{
+-    C2_MacroAssembler _masm(&cbuf);
+ 
+     FloatRegister Frd = reg_to_SingleFloatRegister_object($dst$$reg);
+     FloatRegister Fra = reg_to_SingleFloatRegister_object($a$$reg);
+@@ -2520,7 +2470,6 @@ enc_class fmsubs (sflt_reg dst, sflt_reg a, sflt_reg b, sflt_reg c) %{
+ %}
+ 
+ enc_class fmsubd (dflt_reg dst, dflt_reg a, dflt_reg b, dflt_reg c) %{
+-    C2_MacroAssembler _masm(&cbuf);
+ 
+     FloatRegister Frd = reg_to_DoubleFloatRegister_object($dst$$reg);
+     FloatRegister Fra = reg_to_DoubleFloatRegister_object($a$$reg);
+@@ -2531,7 +2480,6 @@ enc_class fmsubd (dflt_reg dst, dflt_reg a, dflt_reg b, dflt_reg c) %{
+ %}
+ 
+ enc_class fnmadds (sflt_reg dst, sflt_reg a, sflt_reg b, sflt_reg c) %{
+-    C2_MacroAssembler _masm(&cbuf);
+ 
+     FloatRegister Frd = reg_to_SingleFloatRegister_object($dst$$reg);
+     FloatRegister Fra = reg_to_SingleFloatRegister_object($a$$reg);
+@@ -2542,7 +2490,6 @@ enc_class fnmadds (sflt_reg dst, sflt_reg a, sflt_reg b, sflt_reg c) %{
+ %}
+ 
+ enc_class fnmaddd (dflt_reg dst, dflt_reg a, dflt_reg b, dflt_reg c) %{
+-    C2_MacroAssembler _masm(&cbuf);
+ 
+     FloatRegister Frd = reg_to_DoubleFloatRegister_object($dst$$reg);
+     FloatRegister Fra = reg_to_DoubleFloatRegister_object($a$$reg);
+@@ -2553,7 +2500,6 @@ enc_class fnmaddd (dflt_reg dst, dflt_reg a, dflt_reg b, dflt_reg c) %{
+ %}
+ 
+ enc_class fnmsubs (sflt_reg dst, sflt_reg a, sflt_reg b, sflt_reg c) %{
+-    C2_MacroAssembler _masm(&cbuf);
+ 
+     FloatRegister Frd = reg_to_SingleFloatRegister_object($dst$$reg);
+     FloatRegister Fra = reg_to_SingleFloatRegister_object($a$$reg);
+@@ -2564,7 +2510,6 @@ enc_class fnmsubs (sflt_reg dst, sflt_reg a, sflt_reg b, sflt_reg c) %{
+ %}
+ 
+ enc_class fnmsubd (dflt_reg dst, dflt_reg a, dflt_reg b, dflt_reg c) %{
+-    C2_MacroAssembler _masm(&cbuf);
+ 
+     FloatRegister Frd = reg_to_DoubleFloatRegister_object($dst$$reg);
+     FloatRegister Fra = reg_to_DoubleFloatRegister_object($a$$reg);
+@@ -2576,7 +2521,6 @@ enc_class fnmsubd (dflt_reg dst, dflt_reg a, dflt_reg b, dflt_reg c) %{
+ 
+ 
+ enc_class fmovs (dflt_reg dst, dflt_reg src) %{
+-    C2_MacroAssembler _masm(&cbuf);
+ 
+     FloatRegister Fdst = reg_to_SingleFloatRegister_object($dst$$reg);
+     FloatRegister Fsrc = reg_to_SingleFloatRegister_object($src$$reg);
+@@ -2585,7 +2529,6 @@ enc_class fmovs (dflt_reg dst, dflt_reg src) %{
+ %}
+ 
+ enc_class fmovd (dflt_reg dst, dflt_reg src) %{
+-    C2_MacroAssembler _masm(&cbuf);
+ 
+     FloatRegister Fdst = reg_to_DoubleFloatRegister_object($dst$$reg);
+     FloatRegister Fsrc = reg_to_DoubleFloatRegister_object($src$$reg);
+@@ -2594,7 +2537,6 @@ enc_class fmovd (dflt_reg dst, dflt_reg src) %{
+ %}
+ 
+ enc_class Fast_Lock(iRegP oop, iRegP box, o7RegP scratch, iRegP scratch2) %{
+-    C2_MacroAssembler _masm(&cbuf);
+ 
+     Register Roop  = reg_to_register_object($oop$$reg);
+     Register Rbox  = reg_to_register_object($box$$reg);
+@@ -2610,7 +2552,6 @@ enc_class Fast_Lock(iRegP oop, iRegP box, o7RegP scratch, iRegP scratch2) %{
+ %}
+ 
+ enc_class Fast_Unlock(iRegP oop, iRegP box, o7RegP scratch, iRegP scratch2) %{
+-    C2_MacroAssembler _masm(&cbuf);
+ 
+     Register Roop  = reg_to_register_object($oop$$reg);
+     Register Rbox  = reg_to_register_object($box$$reg);
+@@ -2626,7 +2567,6 @@ enc_class Fast_Unlock(iRegP oop, iRegP box, o7RegP scratch, iRegP scratch2) %{
+   %}
+ 
+   enc_class enc_cas( iRegP mem, iRegP old, iRegP new ) %{
+-    C2_MacroAssembler _masm(&cbuf);
+     Register Rmem = reg_to_register_object($mem$$reg);
+     Register Rold = reg_to_register_object($old$$reg);
+     Register Rnew = reg_to_register_object($new$$reg);
+@@ -2640,7 +2580,6 @@ enc_class Fast_Unlock(iRegP oop, iRegP box, o7RegP scratch, iRegP scratch2) %{
+     Register Rold = reg_to_register_object($old$$reg);
+     Register Rnew = reg_to_register_object($new$$reg);
+ 
+-    C2_MacroAssembler _masm(&cbuf);
+     __ mov(Rnew, O7);
+     __ casx(Rmem, Rold, O7);
+     __ cmp( Rold, O7 );
+@@ -2652,7 +2591,6 @@ enc_class Fast_Unlock(iRegP oop, iRegP box, o7RegP scratch, iRegP scratch2) %{
+     Register Rold = reg_to_register_object($old$$reg);
+     Register Rnew = reg_to_register_object($new$$reg);
+ 
+-    C2_MacroAssembler _masm(&cbuf);
+     __ mov(Rnew, O7);
+     __ cas(Rmem, Rold, O7);
+     __ cmp( Rold, O7 );
+@@ -2664,7 +2602,6 @@ enc_class Fast_Unlock(iRegP oop, iRegP box, o7RegP scratch, iRegP scratch2) %{
+     Register Rold = reg_to_register_object($old$$reg);
+     Register Rnew = reg_to_register_object($new$$reg);
+ 
+-    C2_MacroAssembler _masm(&cbuf);
+     __ cas(Rmem, Rold, Rnew);
+   %}
+ 
+@@ -2674,14 +2611,12 @@ enc_class Fast_Unlock(iRegP oop, iRegP box, o7RegP scratch, iRegP scratch2) %{
+     Register Rold = reg_to_register_object($old$$reg);
+     Register Rnew = reg_to_register_object($new$$reg);
+ 
+-    C2_MacroAssembler _masm(&cbuf);
+     __ casx(Rmem, Rold, Rnew);
+   %}
+ 
+   enc_class enc_lflags_ne_to_boolean( iRegI res ) %{
+     Register Rres = reg_to_register_object($res$$reg);
+ 
+-    C2_MacroAssembler _masm(&cbuf);
+     __ mov(1, Rres);
+     __ movcc( Assembler::notEqual, false, Assembler::xcc, G0, Rres );
+   %}
+@@ -2689,13 +2624,11 @@ enc_class Fast_Unlock(iRegP oop, iRegP box, o7RegP scratch, iRegP scratch2) %{
+   enc_class enc_iflags_ne_to_boolean( iRegI res ) %{
+     Register Rres = reg_to_register_object($res$$reg);
+ 
+-    C2_MacroAssembler _masm(&cbuf);
+     __ mov(1, Rres);
+     __ movcc( Assembler::notEqual, false, Assembler::icc, G0, Rres );
+   %}
+ 
+   enc_class floating_cmp ( iRegP dst, regF src1, regF src2 ) %{
+-    C2_MacroAssembler _masm(&cbuf);
+     Register Rdst = reg_to_register_object($dst$$reg);
+     FloatRegister Fsrc1 = $primary ? reg_to_SingleFloatRegister_object($src1$$reg)
+                                      : reg_to_DoubleFloatRegister_object($src1$$reg);
+@@ -2707,11 +2640,10 @@ enc_class Fast_Unlock(iRegP oop, iRegP box, o7RegP scratch, iRegP scratch2) %{
+   %}
+ 
+   enc_class enc_rethrow() %{
+-    cbuf.set_insts_mark();
++    masm->code()->set_insts_mark();
+     Register temp_reg = G3;
+     AddressLiteral rethrow_stub(OptoRuntime::rethrow_stub());
+     assert(temp_reg != reg_to_register_object(R_I0_num), "temp must not break oop_reg");
+-    C2_MacroAssembler _masm(&cbuf);
+ #ifdef ASSERT
+     __ save_frame(0);
+     AddressLiteral last_rethrow_addrlit(&last_rethrow);
+@@ -2728,31 +2660,28 @@ enc_class Fast_Unlock(iRegP oop, iRegP box, o7RegP scratch, iRegP scratch2) %{
+ 
+   enc_class emit_mem_nop() %{
+     // Generates the instruction LDUXA [o6,g0],#0x82,g0
+-    cbuf.insts()->emit_int32((unsigned int) 0xc0839040);
++    masm->code()->insts()->emit_int32((unsigned int) 0xc0839040);
+   %}
+ 
+   enc_class emit_fadd_nop() %{
+     // Generates the instruction FMOVS f31,f31
+-    cbuf.insts()->emit_int32((unsigned int) 0xbfa0003f);
++    masm->code()->insts()->emit_int32((unsigned int) 0xbfa0003f);
+   %}
+ 
+   enc_class emit_br_nop() %{
+     // Generates the instruction BPN,PN .
+-    cbuf.insts()->emit_int32((unsigned int) 0x00400000);
++    masm->code()->insts()->emit_int32((unsigned int) 0x00400000);
+   %}
+ 
+   enc_class enc_membar_acquire %{
+-    C2_MacroAssembler _masm(&cbuf);
+     __ membar( Assembler::Membar_mask_bits(Assembler::LoadStore | Assembler::LoadLoad) );
+   %}
+ 
+   enc_class enc_membar_release %{
+-    C2_MacroAssembler _masm(&cbuf);
+     __ membar( Assembler::Membar_mask_bits(Assembler::LoadStore | Assembler::StoreStore) );
+   %}
+ 
+   enc_class enc_membar_volatile %{
+-    C2_MacroAssembler _masm(&cbuf);
+     __ membar( Assembler::Membar_mask_bits(Assembler::StoreLoad) );
+   %}
+ 
+@@ -8723,7 +8652,7 @@ instruct branchConP(cmpOpP cmp, flagsRegP pcc, label labl) %{
+   ins_encode %{
+     Label* L = $labl$$label;
+     Assembler::Predict predict_taken =
+-      cbuf.is_backward_branch(*L) ? Assembler::pt : Assembler::pn;
++      masm->code()->is_backward_branch(*L) ? Assembler::pt : Assembler::pn;
+ 
+     __ bp( (Assembler::Condition)($cmp$$cmpcode), false, Assembler::ptr_cc, predict_taken, *L);
+     __ delayed()->nop();
+@@ -8742,7 +8671,7 @@ instruct branchConF(cmpOpF cmp, flagsRegF fcc, label labl) %{
+   ins_encode %{
+     Label* L = $labl$$label;
+     Assembler::Predict predict_taken =
+-      cbuf.is_backward_branch(*L) ? Assembler::pt : Assembler::pn;
++      masm->code()->is_backward_branch(*L) ? Assembler::pt : Assembler::pn;
+ 
+     __ fbp( (Assembler::Condition)($cmp$$cmpcode), false, (Assembler::CC)($fcc$$reg), predict_taken, *L);
+     __ delayed()->nop();
+@@ -8789,7 +8718,7 @@ instruct cmpI_reg_branch(cmpOp cmp, iRegI op1, iRegI op2, label labl, flagsReg i
+   ins_encode %{
+     Label* L = $labl$$label;
+     Assembler::Predict predict_taken =
+-      cbuf.is_backward_branch(*L) ? Assembler::pt : Assembler::pn;
++      masm->code()->is_backward_branch(*L) ? Assembler::pt : Assembler::pn;
+     __ cmp($op1$$Register, $op2$$Register);
+     __ bp((Assembler::Condition)($cmp$$cmpcode), false, Assembler::icc, predict_taken, *L);
+     __ delayed()->nop();
+@@ -8808,7 +8737,7 @@ instruct cmpI_imm_branch(cmpOp cmp, iRegI op1, immI5 op2, label labl, flagsReg i
+   ins_encode %{
+     Label* L = $labl$$label;
+     Assembler::Predict predict_taken =
+-      cbuf.is_backward_branch(*L) ? Assembler::pt : Assembler::pn;
++      masm->code()->is_backward_branch(*L) ? Assembler::pt : Assembler::pn;
+     __ cmp($op1$$Register, $op2$$constant);
+     __ bp((Assembler::Condition)($cmp$$cmpcode), false, Assembler::icc, predict_taken, *L);
+     __ delayed()->nop();
+@@ -8827,7 +8756,7 @@ instruct cmpU_reg_branch(cmpOpU cmp, iRegI op1, iRegI op2, label labl, flagsRegU
+   ins_encode %{
+     Label* L = $labl$$label;
+     Assembler::Predict predict_taken =
+-      cbuf.is_backward_branch(*L) ? Assembler::pt : Assembler::pn;
++      masm->code()->is_backward_branch(*L) ? Assembler::pt : Assembler::pn;
+     __ cmp($op1$$Register, $op2$$Register);
+     __ bp((Assembler::Condition)($cmp$$cmpcode), false, Assembler::icc, predict_taken, *L);
+     __ delayed()->nop();
+@@ -8846,7 +8775,7 @@ instruct cmpU_imm_branch(cmpOpU cmp, iRegI op1, immI5 op2, label labl, flagsRegU
+   ins_encode %{
+     Label* L = $labl$$label;
+     Assembler::Predict predict_taken =
+-      cbuf.is_backward_branch(*L) ? Assembler::pt : Assembler::pn;
++      masm->code()->is_backward_branch(*L) ? Assembler::pt : Assembler::pn;
+     __ cmp($op1$$Register, $op2$$constant);
+     __ bp((Assembler::Condition)($cmp$$cmpcode), false, Assembler::icc, predict_taken, *L);
+     __ delayed()->nop();
+@@ -8865,7 +8794,7 @@ instruct cmpUL_reg_branch(cmpOpU cmp, iRegL op1, iRegL op2, label labl, flagsReg
+   ins_encode %{
+     Label* L = $labl$$label;
+     Assembler::Predict predict_taken =
+-      cbuf.is_backward_branch(*L) ? Assembler::pt : Assembler::pn;
++      masm->code()->is_backward_branch(*L) ? Assembler::pt : Assembler::pn;
+     __ cmp($op1$$Register, $op2$$Register);
+     __ bp((Assembler::Condition)($cmp$$cmpcode), false, Assembler::xcc, predict_taken, *L);
+     __ delayed()->nop();
+@@ -8884,7 +8813,7 @@ instruct cmpUL_imm_branch(cmpOpU cmp, iRegL op1, immL5 op2, label labl, flagsReg
+   ins_encode %{
+     Label* L = $labl$$label;
+     Assembler::Predict predict_taken =
+-      cbuf.is_backward_branch(*L) ? Assembler::pt : Assembler::pn;
++      masm->code()->is_backward_branch(*L) ? Assembler::pt : Assembler::pn;
+     __ cmp($op1$$Register, $op2$$constant);
+     __ bp((Assembler::Condition)($cmp$$cmpcode), false, Assembler::xcc, predict_taken, *L);
+     __ delayed()->nop();
+@@ -8903,7 +8832,7 @@ instruct cmpL_reg_branch(cmpOp cmp, iRegL op1, iRegL op2, label labl, flagsRegL
+   ins_encode %{
+     Label* L = $labl$$label;
+     Assembler::Predict predict_taken =
+-      cbuf.is_backward_branch(*L) ? Assembler::pt : Assembler::pn;
++      masm->code()->is_backward_branch(*L) ? Assembler::pt : Assembler::pn;
+     __ cmp($op1$$Register, $op2$$Register);
+     __ bp((Assembler::Condition)($cmp$$cmpcode), false, Assembler::xcc, predict_taken, *L);
+     __ delayed()->nop();
+@@ -8922,7 +8851,7 @@ instruct cmpL_imm_branch(cmpOp cmp, iRegL op1, immL5 op2, label labl, flagsRegL
+   ins_encode %{
+     Label* L = $labl$$label;
+     Assembler::Predict predict_taken =
+-      cbuf.is_backward_branch(*L) ? Assembler::pt : Assembler::pn;
++      masm->code()->is_backward_branch(*L) ? Assembler::pt : Assembler::pn;
+     __ cmp($op1$$Register, $op2$$constant);
+     __ bp((Assembler::Condition)($cmp$$cmpcode), false, Assembler::xcc, predict_taken, *L);
+     __ delayed()->nop();
+@@ -8942,7 +8871,7 @@ instruct cmpP_reg_branch(cmpOpP cmp, iRegP op1, iRegP op2, label labl, flagsRegP
+   ins_encode %{
+     Label* L = $labl$$label;
+     Assembler::Predict predict_taken =
+-      cbuf.is_backward_branch(*L) ? Assembler::pt : Assembler::pn;
++      masm->code()->is_backward_branch(*L) ? Assembler::pt : Assembler::pn;
+     __ cmp($op1$$Register, $op2$$Register);
+     __ bp((Assembler::Condition)($cmp$$cmpcode), false, Assembler::ptr_cc, predict_taken, *L);
+     __ delayed()->nop();
+@@ -8961,7 +8890,7 @@ instruct cmpP_null_branch(cmpOpP cmp, iRegP op1, immP0 null, label labl, flagsRe
+   ins_encode %{
+     Label* L = $labl$$label;
+     Assembler::Predict predict_taken =
+-      cbuf.is_backward_branch(*L) ? Assembler::pt : Assembler::pn;
++      masm->code()->is_backward_branch(*L) ? Assembler::pt : Assembler::pn;
+     __ cmp($op1$$Register, G0);
+     // bpr() is not used here since it has shorter distance.
+     __ bp((Assembler::Condition)($cmp$$cmpcode), false, Assembler::ptr_cc, predict_taken, *L);
+@@ -8981,7 +8910,7 @@ instruct cmpN_reg_branch(cmpOp cmp, iRegN op1, iRegN op2, label labl, flagsReg i
+   ins_encode %{
+     Label* L = $labl$$label;
+     Assembler::Predict predict_taken =
+-      cbuf.is_backward_branch(*L) ? Assembler::pt : Assembler::pn;
++      masm->code()->is_backward_branch(*L) ? Assembler::pt : Assembler::pn;
+     __ cmp($op1$$Register, $op2$$Register);
+     __ bp((Assembler::Condition)($cmp$$cmpcode), false, Assembler::icc, predict_taken, *L);
+     __ delayed()->nop();
+@@ -9000,7 +8929,7 @@ instruct cmpN_null_branch(cmpOp cmp, iRegN op1, immN0 null, label labl, flagsReg
+   ins_encode %{
+     Label* L = $labl$$label;
+     Assembler::Predict predict_taken =
+-      cbuf.is_backward_branch(*L) ? Assembler::pt : Assembler::pn;
++      masm->code()->is_backward_branch(*L) ? Assembler::pt : Assembler::pn;
+     __ cmp($op1$$Register, G0);
+     __ bp((Assembler::Condition)($cmp$$cmpcode), false, Assembler::icc, predict_taken, *L);
+     __ delayed()->nop();
+@@ -9020,7 +8949,7 @@ instruct cmpI_reg_branchLoopEnd(cmpOp cmp, iRegI op1, iRegI op2, label labl, fla
+   ins_encode %{
+     Label* L = $labl$$label;
+     Assembler::Predict predict_taken =
+-      cbuf.is_backward_branch(*L) ? Assembler::pt : Assembler::pn;
++      masm->code()->is_backward_branch(*L) ? Assembler::pt : Assembler::pn;
+     __ cmp($op1$$Register, $op2$$Register);
+     __ bp((Assembler::Condition)($cmp$$cmpcode), false, Assembler::icc, predict_taken, *L);
+     __ delayed()->nop();
+@@ -9039,7 +8968,7 @@ instruct cmpI_imm_branchLoopEnd(cmpOp cmp, iRegI op1, immI5 op2, label labl, fla
+   ins_encode %{
+     Label* L = $labl$$label;
+     Assembler::Predict predict_taken =
+-      cbuf.is_backward_branch(*L) ? Assembler::pt : Assembler::pn;
++      masm->code()->is_backward_branch(*L) ? Assembler::pt : Assembler::pn;
+     __ cmp($op1$$Register, $op2$$constant);
+     __ bp((Assembler::Condition)($cmp$$cmpcode), false, Assembler::icc, predict_taken, *L);
+     __ delayed()->nop();
+@@ -9377,7 +9306,7 @@ instruct branchCon_long(cmpOp cmp, flagsRegL xcc, label labl) %{
+   ins_encode %{
+     Label* L = $labl$$label;
+     Assembler::Predict predict_taken =
+-      cbuf.is_backward_branch(*L) ? Assembler::pt : Assembler::pn;
++      masm->code()->is_backward_branch(*L) ? Assembler::pt : Assembler::pn;
+ 
+     __ bp( (Assembler::Condition)($cmp$$cmpcode), false, Assembler::xcc, predict_taken, *L);
+     __ delayed()->nop();
+@@ -9396,7 +9325,7 @@ instruct branchConU_long(cmpOpU cmp, flagsRegUL xcc, label labl) %{
+   ins_encode %{
+     Label* L = $labl$$label;
+     Assembler::Predict predict_taken =
+-      cbuf.is_backward_branch(*L) ? Assembler::pt : Assembler::pn;
++      masm->code()->is_backward_branch(*L) ? Assembler::pt : Assembler::pn;
+ 
+     __ bp((Assembler::Condition)($cmp$$cmpcode), false, Assembler::xcc, predict_taken, *L);
+     __ delayed()->nop();
+diff --git a/src/hotspot/cpu/sparc/stubGenerator_sparc.cpp b/src/hotspot/cpu/sparc/stubGenerator_sparc.cpp
+index 7c65f8843..9b024b785 100644
+--- a/src/hotspot/cpu/sparc/stubGenerator_sparc.cpp
++++ b/src/hotspot/cpu/sparc/stubGenerator_sparc.cpp
+@@ -1073,8 +1073,8 @@ class StubGenerator: public StubCodeGenerator {
+     }
+ 
+     {
+-      // UnsafeCopyMemory page error: continue at UnsafeCopyMemory common_error_exit
+-      UnsafeCopyMemoryMark ucmm(this, !aligned, false);
++      // UnsafeMemoryAccess page error: continue at UnsafeMemoryAccess common_error_exit
++      UnsafeMemoryAccessMark umam(this, !aligned, false);
+ 
+       // for short arrays, just do single element copy
+       __ cmp(count, 23); // 16 + 7
+@@ -1178,8 +1178,8 @@ class StubGenerator: public StubCodeGenerator {
+     array_overlap_test(nooverlap_target, 0);
+ 
+     {
+-      // UnsafeCopyMemory page error: continue at UnsafeCopyMemory common_error_exit
+-      UnsafeCopyMemoryMark ucmm(this, !aligned, false);
++      // UnsafeMemoryAccess page error: continue at UnsafeMemoryAccess common_error_exit
++      UnsafeMemoryAccessMark umam(this, !aligned, false);
+ 
+       __ add(to, count, end_to);       // offset after last copied element
+ 
+@@ -1287,8 +1287,8 @@ class StubGenerator: public StubCodeGenerator {
+     }
+ 
+     {
+-      // UnsafeCopyMemory page error: continue at UnsafeCopyMemory common_error_exit
+-      UnsafeCopyMemoryMark ucmm(this, !aligned, false);
++      // UnsafeMemoryAccess page error: continue at UnsafeMemoryAccess common_error_exit
++      UnsafeMemoryAccessMark umam(this, !aligned, false);
+       // for short arrays, just do single element copy
+       __ cmp(count, 11); // 8 + 3  (22 bytes)
+       __ brx(Assembler::less, false, Assembler::pn, L_copy_2_bytes);
+@@ -1619,8 +1619,8 @@ class StubGenerator: public StubCodeGenerator {
+     array_overlap_test(nooverlap_target, 1);
+ 
+     {
+-      // UnsafeCopyMemory page error: continue at UnsafeCopyMemory common_error_exit
+-      UnsafeCopyMemoryMark ucmm(this, !aligned, false);
++      // UnsafeMemoryAccess page error: continue at UnsafeMemoryAccess common_error_exit
++      UnsafeMemoryAccessMark umam(this, !aligned, false);
+ 
+       __ sllx(count, LogBytesPerShort, byte_count);
+       __ add(to, byte_count, end_to);  // offset after last copied element
+@@ -1854,8 +1854,8 @@ class StubGenerator: public StubCodeGenerator {
+       BLOCK_COMMENT("Entry:");
+     }
+     {
+-      // UnsafeCopyMemory page error: continue at UnsafeCopyMemory common_error_exit
+-      UnsafeCopyMemoryMark ucmm(this, !aligned, false);
++      // UnsafeMemoryAccess page error: continue at UnsafeMemoryAccess common_error_exit
++      UnsafeMemoryAccessMark umam(this, !aligned, false);
+       generate_disjoint_int_copy_core(aligned);
+     }
+     // O3, O4 are used as temp registers
+@@ -1991,8 +1991,8 @@ class StubGenerator: public StubCodeGenerator {
+ 
+     array_overlap_test(nooverlap_target, 2);
+     {
+-      // UnsafeCopyMemory page error: continue at UnsafeCopyMemory common_error_exit
+-      UnsafeCopyMemoryMark ucmm(this, !aligned, false);
++      // UnsafeMemoryAccess page error: continue at UnsafeMemoryAccess common_error_exit
++      UnsafeMemoryAccessMark umam(this, !aligned, false);
+       generate_conjoint_int_copy_core(aligned);
+     }
+     // O3, O4 are used as temp registers
+@@ -2144,8 +2144,8 @@ class StubGenerator: public StubCodeGenerator {
+     }
+ 
+     {
+-      // UnsafeCopyMemory page error: continue at UnsafeCopyMemory common_error_exit
+-      UnsafeCopyMemoryMark ucmm(this, true, false);
++      // UnsafeMemoryAccess page error: continue at UnsafeMemoryAccess common_error_exit
++      UnsafeMemoryAccessMark umam(this, true, false);
+       generate_disjoint_long_copy_core(aligned);
+     }
+     // O3, O4 are used as temp registers
+@@ -2223,8 +2223,8 @@ class StubGenerator: public StubCodeGenerator {
+ 
+     array_overlap_test(nooverlap_target, 3);
+     {
+-      // UnsafeCopyMemory page error: continue at UnsafeCopyMemory common_error_exit
+-      UnsafeCopyMemoryMark ucmm(this, true, false);
++      // UnsafeMemoryAccess page error: continue at UnsafeMemoryAccess common_error_exit
++      UnsafeMemoryAccessMark umam(this, true, false);
+       generate_conjoint_long_copy_core(aligned);
+     }
+     // O3, O4 are used as temp registers
+@@ -2894,7 +2894,7 @@ class StubGenerator: public StubCodeGenerator {
+     address entry_checkcast_arraycopy;
+ 
+     address ucm_common_error_exit       =  generate_unsafecopy_common_error_exit();
+-    UnsafeCopyMemory::set_common_exit_stub_pc(ucm_common_error_exit);
++    UnsafeMemoryAccess::set_common_exit_stub_pc(ucm_common_error_exit);
+ 
+     //*** jbyte
+     // Always need aligned and unaligned versions
+@@ -5785,8 +5785,8 @@ class StubGenerator: public StubCodeGenerator {
+ 
+ #define UCM_TABLE_MAX_ENTRIES 8
+ void StubGenerator_generate(CodeBuffer* code, StubCodeGenerator::StubsKind kind) {
+-  if (UnsafeCopyMemory::_table == NULL) {
+-    UnsafeCopyMemory::create_table(UCM_TABLE_MAX_ENTRIES);
++  if (UnsafeMemoryAccess::_table == NULL) {
++    UnsafeMemoryAccess::create_table(UCM_TABLE_MAX_ENTRIES);
+   }
+   StubGenerator g(code, kind);
+ }
+diff --git a/src/hotspot/cpu/sparc/upcallLinker_sparc.cpp b/src/hotspot/cpu/sparc/upcallLinker_sparc.cpp
+index c7645f4a0..696b2001e 100644
+--- a/src/hotspot/cpu/sparc/upcallLinker_sparc.cpp
++++ b/src/hotspot/cpu/sparc/upcallLinker_sparc.cpp
+@@ -25,7 +25,7 @@
+ #include "prims/upcallLinker.hpp"
+ #include "utilities/debug.hpp"
+ 
+-address UpcallLinker::make_upcall_stub(jobject receiver, Method* entry,
++address UpcallLinker::make_upcall_stub(jobject receiver, Symbol* signature,
+                                        BasicType* out_sig_bt, int total_out_args,
+                                        BasicType ret_type,
+                                        jobject jabi, jobject jconv,
+diff --git a/src/hotspot/cpu/sparc/vtableStubs_sparc.cpp b/src/hotspot/cpu/sparc/vtableStubs_sparc.cpp
+index 08d749ec1..dfd77a88d 100644
+--- a/src/hotspot/cpu/sparc/vtableStubs_sparc.cpp
++++ b/src/hotspot/cpu/sparc/vtableStubs_sparc.cpp
+@@ -27,7 +27,7 @@
+ #include "code/vtableStubs.hpp"
+ #include "interp_masm_sparc.hpp"
+ #include "memory/resourceArea.hpp"
+-#include "oops/compiledICHolder.hpp"
++#include "code/compiledIC.hpp"
+ #include "oops/instanceKlass.hpp"
+ #include "oops/klassVtable.hpp"
+ #include "runtime/sharedRuntime.hpp"
+@@ -188,7 +188,7 @@ VtableStub* VtableStubs::create_itable_stub(int itable_index) {
+   start_pc = __ pc();
+ 
+   // Receiver subtype check against REFC.
+-  __ ld_ptr(G5_icholder, CompiledICHolder::holder_klass_offset(), G4_interface);
++  __ ld_ptr(G5_icholder, in_bytes(CompiledICData::itable_refc_klass_offset()), G4_interface);
+   __ lookup_interface_method(// inputs: rec. class, interface, itable index
+                              G3_Klass, G4_interface, itable_index,
+                              // outputs: scan temp. reg1, scan temp. reg2
+@@ -200,7 +200,7 @@ VtableStub* VtableStubs::create_itable_stub(int itable_index) {
+   start_pc = __ pc();
+ 
+   // Get Method* and entrypoint for compiler
+-  __ ld_ptr(G5_icholder, CompiledICHolder::holder_metadata_offset(), G4_interface);
++  __ ld_ptr(G5_icholder, in_bytes(CompiledICData::itable_defc_klass_offset()), G4_interface);
+   __ lookup_interface_method(// inputs: rec. class, interface, itable index
+                              G3_Klass, G4_interface, itable_index,
+                              // outputs: method, scan temp. reg
+diff --git a/src/hotspot/share/runtime/arguments.cpp b/src/hotspot/share/runtime/arguments.cpp
+index 6c98f379d..ecb7d35e7 100644
+--- a/src/hotspot/share/runtime/arguments.cpp
++++ b/src/hotspot/share/runtime/arguments.cpp
+@@ -1836,8 +1836,12 @@ bool Arguments::check_vm_args_consistency() {
+ 
+ #if !defined(X86) && !defined(AARCH64) && !defined(RISCV64) && !defined(ARM) && !defined(PPC64) && !defined(S390)
+   if (LockingMode == LM_LIGHTWEIGHT) {
+-    FLAG_SET_CMDLINE(LockingMode, LM_LEGACY);
+-    warning("New lightweight locking not supported on this platform");
++    if (FLAG_IS_DEFAULT(LockingMode)) {
++      FLAG_SET_ERGO(LockingMode, LM_LEGACY);
++    } else {
++      FLAG_SET_CMDLINE(LockingMode, LM_LEGACY);
++      warning("New lightweight locking not supported on this platform");
++    }
+   }
+ #endif
+ 
