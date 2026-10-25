@@ -1,0 +1,1369 @@
+diff --git a/src/hotspot/cpu/sparc/c1_CodeStubs_sparc.cpp b/src/hotspot/cpu/sparc/c1_CodeStubs_sparc.cpp
+index 0fc3dcb13..359084e4b 100644
+--- a/src/hotspot/cpu/sparc/c1_CodeStubs_sparc.cpp
++++ b/src/hotspot/cpu/sparc/c1_CodeStubs_sparc.cpp
+@@ -40,18 +40,6 @@ void C1SafepointPollStub::emit_code(LIR_Assembler* ce) {
+   ShouldNotReachHere();
+ }
+ 
+-RangeCheckStub::RangeCheckStub(CodeEmitInfo* info, LIR_Opr index, LIR_Opr array)
+-  : _index(index), _array(array), _throw_index_out_of_bounds_exception(false) {
+-  assert(info != NULL, "must have info");
+-  _info = new CodeEmitInfo(info);
+-}
+-
+-RangeCheckStub::RangeCheckStub(CodeEmitInfo* info, LIR_Opr index)
+-  : _index(index), _array(), _throw_index_out_of_bounds_exception(true) {
+-  assert(info != NULL, "must have info");
+-  _info = new CodeEmitInfo(info);
+-}
+-
+ void RangeCheckStub::emit_code(LIR_Assembler* ce) {
+   __ bind(_entry);
+ 
+@@ -237,12 +225,6 @@ void NewObjectArrayStub::emit_code(LIR_Assembler* ce) {
+ 
+ 
+ // Implementation of MonitorAccessStubs
+-MonitorEnterStub::MonitorEnterStub(LIR_Opr obj_reg, LIR_Opr lock_reg, CodeEmitInfo* info)
+-  : MonitorAccessStub(obj_reg, lock_reg) {
+-  _info = new CodeEmitInfo(info);
+-}
+-
+-
+ void MonitorEnterStub::emit_code(LIR_Assembler* ce) {
+   __ bind(_entry);
+   __ mov(_obj_reg->as_register(), G4);
+diff --git a/src/hotspot/cpu/sparc/c1_Defs_sparc.hpp b/src/hotspot/cpu/sparc/c1_Defs_sparc.hpp
+index 2a2f75ace..4287f5729 100644
+--- a/src/hotspot/cpu/sparc/c1_Defs_sparc.hpp
++++ b/src/hotspot/cpu/sparc/c1_Defs_sparc.hpp
+@@ -65,6 +65,15 @@ enum {
+ 
+ 
+ // for debug info: a float value in a register is saved in single precision by runtime stubs
++enum {
++  pd_two_operand_lir_form = false
++};
++
++// the number of stack required by ArrayCopyStub
++enum {
++  pd_arraycopystub_reserved_argument_area_size = 2
++};
++
+ enum {
+   pd_float_saved_as_double = false
+ };
+diff --git a/src/hotspot/cpu/sparc/c1_LIRAssembler_sparc.cpp b/src/hotspot/cpu/sparc/c1_LIRAssembler_sparc.cpp
+index 9fe7ed35a..496e0d2b6 100644
+--- a/src/hotspot/cpu/sparc/c1_LIRAssembler_sparc.cpp
++++ b/src/hotspot/cpu/sparc/c1_LIRAssembler_sparc.cpp
+@@ -261,11 +261,11 @@ void LIR_Assembler::monitorexit(LIR_Opr obj_opr, LIR_Opr lock_opr, Register hdr,
+     __ add(reg, lock_reg, lock_reg);
+   }
+   // unlock object
+-  MonitorAccessStub* slow_case = new MonitorExitStub(lock_opr, !UseHeavyMonitors, monitor_no);
++  MonitorAccessStub* slow_case = new MonitorExitStub(lock_opr, (LockingMode != LM_MONITOR), monitor_no);
+   // _slow_case_stubs->append(slow_case);
+   // temporary fix: must be created after exceptionhandler, therefore as call stub
+   _slow_case_stubs->append(slow_case);
+-  if (!UseHeavyMonitors) {
++  if ((LockingMode != LM_MONITOR)) {
+     // try inlined fast unlocking first, revert to slow locking if it fails
+     // note: lock_reg points to the displaced header since the displaced header offset is 0!
+     assert(BasicLock::displaced_header_offset_in_bytes() == 0, "lock_reg must point to the displaced header");
+@@ -2679,7 +2679,7 @@ void LIR_Assembler::emit_lock(LIR_OpLock* op) {
+   // obj may not be an oop
+   if (op->code() == lir_lock) {
+     MonitorEnterStub* stub = (MonitorEnterStub*)op->stub();
+-    if (!UseHeavyMonitors) {
++    if ((LockingMode != LM_MONITOR)) {
+       assert(BasicLock::displaced_header_offset_in_bytes() == 0, "lock_reg must point to the displaced header");
+       // add debug info for NullPointerException only if one is possible
+       if (op->info() != NULL) {
+@@ -2698,7 +2698,7 @@ void LIR_Assembler::emit_lock(LIR_OpLock* op) {
+     }
+   } else {
+     assert (op->code() == lir_unlock, "Invalid code, expected lir_unlock");
+-    if (!UseHeavyMonitors) {
++    if ((LockingMode != LM_MONITOR)) {
+       assert(BasicLock::displaced_header_offset_in_bytes() == 0, "lock_reg must point to the displaced header");
+       __ unlock_object(hdr, obj, lock, *op->stub()->entry());
+     } else {
+diff --git a/src/hotspot/cpu/sparc/c1_MacroAssembler_sparc.cpp b/src/hotspot/cpu/sparc/c1_MacroAssembler_sparc.cpp
+index 9d1431895..c33604403 100644
+--- a/src/hotspot/cpu/sparc/c1_MacroAssembler_sparc.cpp
++++ b/src/hotspot/cpu/sparc/c1_MacroAssembler_sparc.cpp
+@@ -86,7 +86,7 @@ void C1_MacroAssembler::lock_object(Register Rmark, Register Roop, Register Rbox
+   verify_oop(Roop);
+ 
+   // save object being locked into the BasicObjectLock
+-  st_ptr(Roop, Rbox, BasicObjectLock::obj_offset_in_bytes());
++  st_ptr(Roop, Rbox, in_bytes(BasicObjectLock::obj_offset()));
+ 
+   // Save Rbox in Rscratch to be used for the cas operation
+   mov(Rbox, Rscratch);
+@@ -127,7 +127,7 @@ void C1_MacroAssembler::unlock_object(Register Rmark, Register Roop, Register Rb
+   ld_ptr(Rbox, BasicLock::displaced_header_offset_in_bytes(), Rmark);
+   br_null_short(Rmark, Assembler::pt, done);
+   // load object
+-  ld_ptr(Rbox, BasicObjectLock::obj_offset_in_bytes(), Roop);
++  ld_ptr(Rbox, in_bytes(BasicObjectLock::obj_offset()), Roop);
+   verify_oop(Roop);
+ 
+   // Check if it is still a light weight lock, this is is true if we see
+diff --git a/src/hotspot/cpu/sparc/c1_Runtime1_sparc.cpp b/src/hotspot/cpu/sparc/c1_Runtime1_sparc.cpp
+index 852007d93..8dd9a0f5d 100644
+--- a/src/hotspot/cpu/sparc/c1_Runtime1_sparc.cpp
++++ b/src/hotspot/cpu/sparc/c1_Runtime1_sparc.cpp
+@@ -62,15 +62,10 @@ int StubAssembler::call_RT(Register oop_result1, Register metadata_result, addre
+   assert(number_of_arguments >= 0   , "cannot have negative number of arguments");
+ 
+   set_last_Java_frame(SP, noreg);
+-  if (VerifyThread)  mov(G2_thread, O0); // about to be smashed; pass early
+   save_thread(L7_thread_cache);
+   // do the call
+   call(entry_point, relocInfo::runtime_call_type);
+-  if (!VerifyThread) {
+-    delayed()->mov(G2_thread, O0);  // pass thread as first argument
+-  } else {
+-    delayed()->nop();             // (thread already passed)
+-  }
++  delayed()->mov(G2_thread, O0);  // pass thread as first argument
+   int call_offset = offset();  // offset of return address
+   restore_thread(L7_thread_cache);
+   reset_last_Java_frame();
+diff --git a/src/hotspot/cpu/sparc/c1_globals_sparc.hpp b/src/hotspot/cpu/sparc/c1_globals_sparc.hpp
+index f019d7425..733915d31 100644
+--- a/src/hotspot/cpu/sparc/c1_globals_sparc.hpp
++++ b/src/hotspot/cpu/sparc/c1_globals_sparc.hpp
+@@ -62,6 +62,5 @@ define_pd_global(bool, UseTypeProfile,               false);
+ 
+ define_pd_global(bool, OptimizeSinglePrecision,      false);
+ define_pd_global(bool, CSEArrayLength,               true );
+-define_pd_global(bool, TwoOperandLIRForm,            false);
+ 
+ #endif // CPU_SPARC_C1_GLOBALS_SPARC_HPP
+diff --git a/src/hotspot/cpu/sparc/continuationFreezeThaw_sparc.inline.hpp b/src/hotspot/cpu/sparc/continuationFreezeThaw_sparc.inline.hpp
+index a0fb89214..4f321e658 100644
+--- a/src/hotspot/cpu/sparc/continuationFreezeThaw_sparc.inline.hpp
++++ b/src/hotspot/cpu/sparc/continuationFreezeThaw_sparc.inline.hpp
+@@ -1,5 +1,5 @@
+ /*
+- * Copyright (c) 2019, 2022, Oracle and/or its affiliates. All rights reserved.
++ * Copyright (c) 2019, 2023, Oracle and/or its affiliates. All rights reserved.
+  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+  *
+  * This code is free software; you can redistribute it and/or modify it
+@@ -70,17 +70,13 @@ template<typename FKind> frame ThawBase::new_stack_frame(const frame& hf, frame&
+   return frame();
+ }
+ 
+-inline void ThawBase::set_interpreter_frame_bottom(const frame& f, intptr_t* bottom) {
+-  Unimplemented();
+-}
+-
+ inline void ThawBase::derelativize_interpreted_frame_metadata(const frame& hf, const frame& f) {
+   Unimplemented();
+ }
+ 
+ inline intptr_t* ThawBase::align(const frame& hf, intptr_t* frame_sp, frame& caller, bool bottom) {
+   Unimplemented();
+-  return NULL;
++  return nullptr;
+ }
+ 
+ inline void ThawBase::patch_pd(frame& f, const frame& caller) {
+diff --git a/src/hotspot/cpu/sparc/continuationHelper_sparc.inline.hpp b/src/hotspot/cpu/sparc/continuationHelper_sparc.inline.hpp
+index 9bba6ca31..dc16994dc 100644
+--- a/src/hotspot/cpu/sparc/continuationHelper_sparc.inline.hpp
++++ b/src/hotspot/cpu/sparc/continuationHelper_sparc.inline.hpp
+@@ -1,5 +1,5 @@
+ /*
+- * Copyright (c) 2022, Oracle and/or its affiliates. All rights reserved.
++ * Copyright (c) 2022, 2023, Oracle and/or its affiliates. All rights reserved.
+  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+  *
+  * This code is free software; you can redistribute it and/or modify it
+@@ -32,7 +32,7 @@
+ template<typename FKind>
+ static inline intptr_t** link_address(const frame& f) {
+   Unimplemented();
+-  return NULL;
++  return nullptr;
+ }
+ 
+ inline int ContinuationHelper::frame_align_words(int size) {
+@@ -42,7 +42,7 @@ inline int ContinuationHelper::frame_align_words(int size) {
+ 
+ inline intptr_t* ContinuationHelper::frame_align_pointer(intptr_t* sp) {
+   Unimplemented();
+-  return NULL;
++  return nullptr;
+ }
+ 
+ template<typename FKind>
+@@ -75,18 +75,18 @@ inline bool ContinuationHelper::Frame::assert_frame_laid_out(frame f) {
+ 
+ inline intptr_t** ContinuationHelper::Frame::callee_link_address(const frame& f) {
+   Unimplemented();
+-  return NULL;
++  return nullptr;
+ }
+ 
+ template<typename FKind>
+ static inline intptr_t* real_fp(const frame& f) {
+   Unimplemented();
+-  return NULL;
++  return nullptr;
+ }
+ 
+ inline address* ContinuationHelper::InterpretedFrame::return_pc_address(const frame& f) {
+   Unimplemented();
+-  return NULL;
++  return nullptr;
+ }
+ 
+ inline void ContinuationHelper::InterpretedFrame::patch_sender_sp(frame& f, const frame& caller) {
+@@ -95,12 +95,12 @@ inline void ContinuationHelper::InterpretedFrame::patch_sender_sp(frame& f, cons
+ 
+ inline address* ContinuationHelper::Frame::return_pc_address(const frame& f) {
+   Unimplemented();
+-  return NULL;
++  return nullptr;
+ }
+ 
+ inline address ContinuationHelper::Frame::real_pc(const frame& f) {
+   Unimplemented();
+-  return NULL;
++  return nullptr;
+ }
+ 
+ inline void ContinuationHelper::Frame::patch_pc(const frame& f, address pc) {
+@@ -109,22 +109,22 @@ inline void ContinuationHelper::Frame::patch_pc(const frame& f, address pc) {
+ 
+ inline intptr_t* ContinuationHelper::InterpretedFrame::frame_top(const frame& f, InterpreterOopMap* mask) { // inclusive; this will be copied with the frame
+   Unimplemented();
+-  return NULL;
++  return nullptr;
+ }
+ 
+ inline intptr_t* ContinuationHelper::InterpretedFrame::frame_bottom(const frame& f) { // exclusive; this will not be copied with the frame
+   Unimplemented();
+-  return NULL;
++  return nullptr;
+ }
+ 
+ inline intptr_t* ContinuationHelper::InterpretedFrame::frame_top(const frame& f, int callee_argsize, bool callee_interpreted) {
+   Unimplemented();
+-  return NULL;
++  return nullptr;
+ }
+ 
+ inline intptr_t* ContinuationHelper::InterpretedFrame::callers_sp(const frame& f) {
+   Unimplemented();
+-  return NULL;
++  return nullptr;
+ }
+ 
+ #endif // CPU_SPARC_CONTINUATIONHELPER_SPARC_INLINE_HPP
+diff --git a/src/hotspot/cpu/sparc/downcallLinker_sparc.cpp b/src/hotspot/cpu/sparc/downcallLinker_sparc.cpp
+index 37b6f43ac..baee7d7a0 100644
+--- a/src/hotspot/cpu/sparc/downcallLinker_sparc.cpp
++++ b/src/hotspot/cpu/sparc/downcallLinker_sparc.cpp
+@@ -1,5 +1,5 @@
+ /*
+- * Copyright (c) 2022, Oracle and/or its affiliates. All rights reserved.
++ * Copyright (c) 2022, 2023, Oracle and/or its affiliates. All rights reserved.
+  * Copyright (c) 2020, Red Hat, Inc. All rights reserved.
+  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+  *
+@@ -33,7 +33,8 @@ RuntimeStub* DowncallLinker::make_downcall_stub(BasicType* signature,
+                                                 const GrowableArray<VMStorage>& input_registers,
+                                                 const GrowableArray<VMStorage>& output_registers,
+                                                 bool needs_return_buffer,
+-                                                int captured_state_mask) {
++                                                int captured_state_mask,
++                                                bool needs_transition) {
+   Unimplemented();
+   return nullptr;
+ }
+diff --git a/src/hotspot/cpu/sparc/foreignGlobals_sparc.cpp b/src/hotspot/cpu/sparc/foreignGlobals_sparc.cpp
+index 5438cbe5c..d3a318536 100644
+--- a/src/hotspot/cpu/sparc/foreignGlobals_sparc.cpp
++++ b/src/hotspot/cpu/sparc/foreignGlobals_sparc.cpp
+@@ -1,5 +1,5 @@
+ /*
+- * Copyright (c) 2022, Oracle and/or its affiliates. All rights reserved.
++ * Copyright (c) 2022, 2023, Oracle and/or its affiliates. All rights reserved.
+  * Copyright (c) 2020, Red Hat, Inc. All rights reserved.
+  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+  *
+@@ -29,6 +29,10 @@
+ 
+ class MacroAssembler;
+ 
++bool ForeignGlobals::is_foreign_linker_supported() {
++  return false;
++}
++
+ const ABIDescriptor ForeignGlobals::parse_abi_descriptor(jobject jabi) {
+   Unimplemented();
+   return {};
+diff --git a/src/hotspot/cpu/sparc/frame_sparc.hpp b/src/hotspot/cpu/sparc/frame_sparc.hpp
+index 85e6d3cf5..bfb473fd6 100644
+--- a/src/hotspot/cpu/sparc/frame_sparc.hpp
++++ b/src/hotspot/cpu/sparc/frame_sparc.hpp
+@@ -225,6 +225,7 @@
+   };
+ 
+  private:
++  inline intptr_t** interpreter_frame_locals_addr() const;
+   ConstantPoolCache** interpreter_frame_cpoolcache_addr() const;
+ 
+   // where Lmonitors is saved:
+diff --git a/src/hotspot/cpu/sparc/frame_sparc.inline.hpp b/src/hotspot/cpu/sparc/frame_sparc.inline.hpp
+index 1fa77f749..baafc0b32 100644
+--- a/src/hotspot/cpu/sparc/frame_sparc.inline.hpp
++++ b/src/hotspot/cpu/sparc/frame_sparc.inline.hpp
+@@ -90,6 +90,10 @@ inline intptr_t*    frame::sender_sp() const  { return fp(); }
+ 
+ inline intptr_t* frame::real_fp() const { return fp(); }
+ 
++inline intptr_t* frame::interpreter_frame_locals() const {
++  return *interpreter_frame_locals_addr();
++}
++
+ inline intptr_t** frame::interpreter_frame_locals_addr() const {
+   return (intptr_t**) sp_addr_at( Llocals->sp_offset_in_saved_window());
+ }
+diff --git a/src/hotspot/cpu/sparc/gc/shared/barrierSetAssembler_sparc.cpp b/src/hotspot/cpu/sparc/gc/shared/barrierSetAssembler_sparc.cpp
+index c99d370aa..ed4939dd0 100644
+--- a/src/hotspot/cpu/sparc/gc/shared/barrierSetAssembler_sparc.cpp
++++ b/src/hotspot/cpu/sparc/gc/shared/barrierSetAssembler_sparc.cpp
+@@ -103,6 +103,6 @@ void BarrierSetAssembler::load_at(MacroAssembler* masm, DecoratorSet decorators,
+ 
+ void BarrierSetAssembler::try_resolve_jobject_in_native(MacroAssembler* masm, Register jni_env,
+                                                         Register obj, Register tmp, Label& slowpath) {
+-  __ andn(obj, JNIHandles::weak_tag_mask, obj);
++  __ andn(obj, JNIHandles::tag_mask, obj);
+   __ ld_ptr(obj, 0, obj);
+ }
+diff --git a/src/hotspot/cpu/sparc/gc/shared/barrierSetNMethod_sparc.cpp b/src/hotspot/cpu/sparc/gc/shared/barrierSetNMethod_sparc.cpp
+index a0361ddc2..90f971a31 100644
+--- a/src/hotspot/cpu/sparc/gc/shared/barrierSetNMethod_sparc.cpp
++++ b/src/hotspot/cpu/sparc/gc/shared/barrierSetNMethod_sparc.cpp
+@@ -1,5 +1,5 @@
+ /*
+- * Copyright (c) 2018, Oracle and/or its affiliates. All rights reserved.
++ * Copyright (c) 2018, 2022, Oracle and/or its affiliates. All rights reserved.
+  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+  *
+  * This code is free software; you can redistribute it and/or modify it
+@@ -30,11 +30,11 @@ void BarrierSetNMethod::deoptimize(nmethod* nm, address* return_address_ptr) {
+   ShouldNotReachHere();
+ }
+ 
+-void BarrierSetNMethod::disarm(nmethod* nm) {
++void BarrierSetNMethod::set_guard_value(nmethod* nm, int value) {
+   ShouldNotReachHere();
+ }
+ 
+-bool BarrierSetNMethod::is_armed(nmethod* nm) {
++int BarrierSetNMethod::guard_value(nmethod* nm) {
+   ShouldNotReachHere();
+-  return false;
++  return -1;
+ }
+diff --git a/src/hotspot/cpu/sparc/globalDefinitions_sparc.hpp b/src/hotspot/cpu/sparc/globalDefinitions_sparc.hpp
+index 779a0a0bb..914fca1d7 100644
+--- a/src/hotspot/cpu/sparc/globalDefinitions_sparc.hpp
++++ b/src/hotspot/cpu/sparc/globalDefinitions_sparc.hpp
+@@ -25,6 +25,8 @@
+ #ifndef CPU_SPARC_GLOBALDEFINITIONS_SPARC_HPP
+ #define CPU_SPARC_GLOBALDEFINITIONS_SPARC_HPP
+ 
++const size_t pd_segfault_address = 1024;
++
+ // Size of Sparc Instructions
+ const int BytesPerInstWord = 4;
+ 
+diff --git a/src/hotspot/cpu/sparc/globals_sparc.hpp b/src/hotspot/cpu/sparc/globals_sparc.hpp
+index 3baffcd77..b5194a2d7 100644
+--- a/src/hotspot/cpu/sparc/globals_sparc.hpp
++++ b/src/hotspot/cpu/sparc/globals_sparc.hpp
+@@ -37,6 +37,7 @@
+ // the load of the dispatch address and hence the jmp would still go to the location
+ // according to the prior table. So, we let the thread continue and let it block by itself.
+ define_pd_global(bool, DontYieldALot,               true);  // yield no more than 100 times per second
++define_pd_global(bool, DelayCompilerStubsGeneration, false); // compiler stubs are part of the final stubs
+ 
+ define_pd_global(bool, ImplicitNullChecks,          true);  // Generate code for implicit null checks
+ define_pd_global(bool, TrapBasedNullChecks,         false); // Not needed on sparc.
+diff --git a/src/hotspot/cpu/sparc/interp_masm_sparc.cpp b/src/hotspot/cpu/sparc/interp_masm_sparc.cpp
+index dca50d4cf..577e793a0 100644
+--- a/src/hotspot/cpu/sparc/interp_masm_sparc.cpp
++++ b/src/hotspot/cpu/sparc/interp_masm_sparc.cpp
+@@ -33,6 +33,7 @@
+ #include "oops/methodData.hpp"
+ #include "oops/method.hpp"
+ #include "oops/methodCounters.hpp"
++#include "oops/resolvedIndyEntry.hpp"
+ #include "prims/jvmtiExport.hpp"
+ #include "prims/jvmtiThreadState.hpp"
+ #include "runtime/basicLock.hpp"
+@@ -685,6 +686,15 @@ void InterpreterMacroAssembler::get_cache_index_at_bcp(Register temp, Register i
+ }
+ 
+ 
++void InterpreterMacroAssembler::load_resolved_indy_entry(Register cache, Register index) {
++  assert_different_registers(cache, index);
++  get_cache_index_at_bcp(cache, index, 1, sizeof(u4));
++  ld_ptr(LcpoolCache, in_bytes(ConstantPoolCache::invokedynamic_entries_offset()), cache);
++  sll(index, log2i_exact(sizeof(ResolvedIndyEntry)), index);
++  add(cache, Array<ResolvedIndyEntry>::base_offset_in_bytes(), cache);
++  add(cache, index, cache);
++}
++
+ void InterpreterMacroAssembler::get_cache_and_index_at_bcp(Register cache, Register tmp,
+                                                            int bcp_offset, size_t index_size) {
+   assert(bcp_offset > 0, "bcp is still pointing to start of bytecode");
+@@ -746,8 +756,8 @@ void InterpreterMacroAssembler::load_resolved_reference_at_index(
+   sll(index, LogBytesPerHeapOop, index);
+   get_constant_pool(result);
+   // load pointer for resolved_references[] objArray
+-  ld_ptr(result, ConstantPool::cache_offset_in_bytes(), result);
+-  ld_ptr(result, ConstantPoolCache::resolved_references_offset_in_bytes(), result);
++  ld_ptr(result, in_bytes(ConstantPool::cache_offset()), result);
++  ld_ptr(result, in_bytes(ConstantPoolCache::resolved_references_offset()), result);
+   resolve_oop_handle(result, tmp);
+   // Add in the index
+   add(result, index, result);
+@@ -768,7 +778,7 @@ void InterpreterMacroAssembler::load_resolved_klass_at_offset(Register Rcpool,
+   lduh(Roffset, sizeof(ConstantPool) + 2, Roffset);  // Roffset = resolved_klass_index
+ 
+   Register Rresolved_klasses = Rklass;
+-  ld_ptr(Rcpool, ConstantPool::resolved_klasses_offset_in_bytes(), Rresolved_klasses);
++  ld_ptr(Rcpool, in_bytes(ConstantPool::resolved_klasses_offset()), Rresolved_klasses);
+   sll(Roffset, LogBytesPerWord, Roffset);
+   add(Roffset, Array<Klass*>::base_offset_in_bytes(), Roffset);
+   ld_ptr(Rresolved_klasses, Roffset, Rklass);
+@@ -933,13 +943,13 @@ void InterpreterMacroAssembler::get_constant_pool(Register Rdst) {
+ 
+ void InterpreterMacroAssembler::get_constant_pool_cache(Register Rdst) {
+   get_constant_pool(Rdst);
+-  ld_ptr(Rdst, ConstantPool::cache_offset_in_bytes(), Rdst);
++  ld_ptr(Rdst, in_bytes(ConstantPool::cache_offset()), Rdst);
+ }
+ 
+ 
+ void InterpreterMacroAssembler::get_cpool_and_tags(Register Rcpool, Register Rtags) {
+   get_constant_pool(Rcpool);
+-  ld_ptr(Rcpool, ConstantPool::tags_offset_in_bytes(), Rtags);
++  ld_ptr(Rcpool, in_bytes(ConstantPool::tags_offset()), Rtags);
+ }
+ 
+ 
+@@ -990,7 +1000,7 @@ void InterpreterMacroAssembler::unlock_if_synchronized_method(TosState state,
+   // pass top-most monitor elem
+   add( top_most_monitor(), O1 );
+ 
+-  ld_ptr(O1, BasicObjectLock::obj_offset_in_bytes(), G3_scratch);
++  ld_ptr(O1, in_bytes(BasicObjectLock::obj_offset()), G3_scratch);
+   br_notnull_short(G3_scratch, pt, unlock);
+ 
+   if (throw_monitor_exception) {
+@@ -1071,7 +1081,7 @@ void InterpreterMacroAssembler::unlock_if_synchronized_method(TosState state,
+     cmp(Rmptr, Rlimit);                         // check if bottom reached
+     brx(Assembler::notEqual, true, pn, loop);   // if not at bottom then check this entry
+     delayed()->
+-    ld_ptr(Rmptr, BasicObjectLock::obj_offset_in_bytes() - delta, Rtemp);
++    ld_ptr(Rmptr, in_bytes(BasicObjectLock::obj_offset()) - delta, Rtemp);
+   }
+ 
+   bind(no_unlock);
+@@ -1183,14 +1193,14 @@ void InterpreterMacroAssembler::remove_activation(TosState state,
+ // Argument - lock_reg points to the BasicObjectLock to be used for locking,
+ //            it must be initialized with the object to lock
+ void InterpreterMacroAssembler::lock_object(Register lock_reg, Register Object) {
+-  if (UseHeavyMonitors) {
++  if ((LockingMode == LM_MONITOR)) {
+     call_VM(noreg, CAST_FROM_FN_PTR(address, InterpreterRuntime::monitorenter), lock_reg);
+   }
+   else {
+     Register obj_reg = Object;
+     Register mark_reg = G4_scratch;
+     Register temp_reg = G1_scratch;
+-    Address  lock_addr(lock_reg, BasicObjectLock::lock_offset_in_bytes());
++    Address  lock_addr(lock_reg, in_bytes(BasicObjectLock::lock_offset()));
+     Address  mark_addr(obj_reg, oopDesc::mark_offset_in_bytes());
+     Label    done;
+ 
+@@ -1254,18 +1264,18 @@ void InterpreterMacroAssembler::lock_object(Register lock_reg, Register Object)
+ // Argument - lock_reg points to the BasicObjectLock for lock
+ // Throw IllegalMonitorException if object is not locked by current thread
+ void InterpreterMacroAssembler::unlock_object(Register lock_reg) {
+-  if (UseHeavyMonitors) {
++  if ((LockingMode == LM_MONITOR)) {
+     call_VM_leaf(noreg, CAST_FROM_FN_PTR(address, InterpreterRuntime::monitorexit), lock_reg);
+   } else {
+     Register obj_reg = G3_scratch;
+     Register mark_reg = G4_scratch;
+     Register displaced_header_reg = G1_scratch;
+-    Address  lockobj_addr(lock_reg, BasicObjectLock::obj_offset_in_bytes());
++    Address  lockobj_addr(lock_reg, in_bytes(BasicObjectLock::obj_offset()));
+     Address  mark_addr(obj_reg, oopDesc::mark_offset_in_bytes());
+     Label    done;
+ 
+     // Test first if we are in the fast recursive case
+-    Address lock_addr(lock_reg, BasicObjectLock::lock_offset_in_bytes() + BasicLock::displaced_header_offset_in_bytes());
++    Address lock_addr(lock_reg, in_bytes(BasicObjectLock::lock_offset()) + BasicLock::displaced_header_offset_in_bytes());
+     ld_ptr(lock_addr, displaced_header_reg);
+     br_null(displaced_header_reg, true, Assembler::pn, done);
+     delayed()->st_ptr(G0, lockobj_addr);  // free entry
+@@ -2014,7 +2024,7 @@ void InterpreterMacroAssembler::profile_return_type(Register ret, Register tmp1,
+       cmp_and_br_short(tmp1, Bytecodes::_invokedynamic, equal, pn, do_profile);
+       cmp(tmp1, Bytecodes::_invokehandle);
+       br(equal, false, pn, do_profile);
+-      delayed()->lduh(Lmethod, Method::intrinsic_id_offset_in_bytes(), tmp1);
++      delayed()->lduh(Lmethod, in_bytes(Method::intrinsic_id_offset()), tmp1);
+       cmp_and_br_short(tmp1, static_cast<int>(vmIntrinsics::_compiledLambdaForm), notEqual, pt, profile_continue);
+ 
+       bind(do_profile);
+diff --git a/src/hotspot/cpu/sparc/interp_masm_sparc.hpp b/src/hotspot/cpu/sparc/interp_masm_sparc.hpp
+index f70db2a70..72c6efeb7 100644
+--- a/src/hotspot/cpu/sparc/interp_masm_sparc.hpp
++++ b/src/hotspot/cpu/sparc/interp_masm_sparc.hpp
+@@ -182,6 +182,9 @@ class InterpreterMacroAssembler: public MacroAssembler {
+   // Note: This one does not fetch the cache.  The first argument is a temp which may be killed.
+   void get_cache_index_at_bcp(Register temp, Register index, int bcp_offset, size_t index_size = sizeof(u2));
+ 
++  // load cpool->resolved_indy_entries() entry for the invokedynamic at bcp
++  void load_resolved_indy_entry(Register cache, Register index);
++
+   // load cpool->resolved_references(index);
+   void load_resolved_reference_at_index(Register result, Register index, Register tmp);
+ 
+diff --git a/src/hotspot/cpu/sparc/macroAssembler_sparc.cpp b/src/hotspot/cpu/sparc/macroAssembler_sparc.cpp
+index ed70296b1..14c6b28bc 100644
+--- a/src/hotspot/cpu/sparc/macroAssembler_sparc.cpp
++++ b/src/hotspot/cpu/sparc/macroAssembler_sparc.cpp
+@@ -170,18 +170,33 @@ int MacroAssembler::branch_destination(int inst, int pos) {
+ }
+ 
+ void MacroAssembler::resolve_jobject(Register value, Register tmp) {
+-  Label done, not_weak;
+-  br_null(value, false, Assembler::pn, done); // Use NULL as-is.
+-  delayed()->andcc(value, JNIHandles::weak_tag_mask, G0); // Test for jweak
+-  brx(Assembler::zero, true, Assembler::pt, not_weak);
++  Label done, tagged, weak_tagged;
++  br_null(value, false, Assembler::pn, done); // Use null as-is.
++  delayed()->andcc(value, JNIHandles::tag_mask, G0); // Test for tag.
++  brx(Assembler::notZero, false, Assembler::pn, tagged);
+   delayed()->nop();
+-  access_load_at(T_OBJECT, IN_NATIVE | ON_PHANTOM_OOP_REF,
+-                 Address(value, -JNIHandles::weak_tag_value), value, tmp);
++
++  // Resolve local handle
++  access_load_at(T_OBJECT, IN_NATIVE | AS_RAW, Address(value, 0), value, tmp);
+   verify_oop(value);
+-  br (Assembler::always, true, Assembler::pt, done);
++  ba(done);
++  delayed()->nop();
++
++  bind(tagged);
++  andcc(value, JNIHandles::TypeTag::weak_global, G0); // Test for weak tag.
++  brx(Assembler::notZero, false, Assembler::pn, weak_tagged);
+   delayed()->nop();
+-  bind(not_weak);
+-  access_load_at(T_OBJECT, IN_NATIVE, Address(value, 0), value, tmp);
++
++  // Resolve global handle
++  access_load_at(T_OBJECT, IN_NATIVE, Address(value, -JNIHandles::TypeTag::global), value, tmp);
++  verify_oop(value);
++  ba(done);
++  delayed()->nop();
++
++  bind(weak_tagged);
++  // Resolve jweak.
++  access_load_at(T_OBJECT, IN_NATIVE | ON_PHANTOM_OOP_REF,
++                 Address(value, -JNIHandles::TypeTag::weak_global), value, tmp);
+   verify_oop(value);
+   bind(done);
+ }
+@@ -287,32 +302,7 @@ void MacroAssembler::get_thread() {
+   restore(O0, 0, G2_thread);
+ }
+ 
+-static Thread* verify_thread_subroutine(Thread* gthread_value) {
+-  Thread* correct_value = Thread::current();
+-  guarantee(gthread_value == correct_value, "G2_thread value must be the thread");
+-  return correct_value;
+-}
+-
+ void MacroAssembler::verify_thread() {
+-  if (VerifyThread) {
+-    // NOTE: this chops off the heads of the 64-bit O registers.
+-    // make sure G2_thread contains the right value
+-    save_frame_and_mov(0, Lmethod, Lmethod);   // to avoid clobbering O0 (and propagate Lmethod)
+-    mov(G1, L1);                // avoid clobbering G1
+-    // G2 saved below
+-    mov(G3, L3);                // avoid clobbering G3
+-    mov(G4, L4);                // avoid clobbering G4
+-    mov(G5_method, L5);         // avoid clobbering G5_method
+-    call(CAST_FROM_FN_PTR(address,verify_thread_subroutine), relocInfo::runtime_call_type);
+-    delayed()->mov(G2_thread, O0);
+-
+-    mov(L1, G1);                // Restore G1
+-    // G2 restored below
+-    mov(L3, G3);                // restore G3
+-    mov(L4, G4);                // restore G4
+-    mov(L5, G5_method);         // restore G5_method
+-    restore(O0, 0, G2_thread);
+-  }
+ }
+ 
+ 
+@@ -322,10 +312,6 @@ void MacroAssembler::save_thread(const Register thread_cache) {
+     assert(thread_cache->is_local() || thread_cache->is_in(), "bad volatile");
+     mov(G2_thread, thread_cache);
+   }
+-  if (VerifyThread) {
+-    // smash G2_thread, as if the VM were about to anyway
+-    set(0x67676767, G2_thread);
+-  }
+ }
+ 
+ 
+@@ -437,14 +423,10 @@ void MacroAssembler::call_VM_base(
+ 
+   // 64-bit last_java_sp is biased!
+   set_last_Java_frame(last_java_sp, noreg);
+-  if (VerifyThread)  mov(G2_thread, O0); // about to be smashed; pass early
+   save_thread(thread_cache);
+   // do the call
+   call(entry_point, relocInfo::runtime_call_type);
+-  if (!VerifyThread)
+-    delayed()->mov(G2_thread, O0);  // pass thread as first argument
+-  else
+-    delayed()->nop();             // (thread already passed)
++  delayed()->mov(G2_thread, O0);  // pass thread as first argument
+   restore_thread(thread_cache);
+   reset_last_Java_frame();
+ 
+@@ -1023,7 +1005,6 @@ void MacroAssembler::align(int modulus) {
+ }
+ 
+ void RegistersForDebugging::print(outputStream* s) {
+-  FlagSetting fs(Debugging, true);
+   int j;
+   for (j = 0; j < 8; ++j) {
+     if (j != 6) { s->print("i%d = ", j); os::print_location(s, i[j]); }
+@@ -2050,7 +2031,7 @@ void MacroAssembler::lookup_interface_method(Register recv_klass,
+     // Adjust recv_klass by scaled itable_index, so we can free itable_index.
+     RegisterOrConstant itable_offset = itable_index;
+     itable_offset = regcon_sll_ptr(itable_index, exact_log2(itableMethodEntry::size() * wordSize), itable_offset);
+-    itable_offset = regcon_inc_ptr(itable_offset, itableMethodEntry::method_offset_in_bytes(), itable_offset);
++    itable_offset = regcon_inc_ptr(itable_offset, in_bytes(itableMethodEntry::method_offset()), itable_offset);
+     add(recv_klass, ensure_simm13_or_reg(itable_offset, sethi_temp), recv_klass);
+   }
+ 
+@@ -2064,7 +2045,7 @@ void MacroAssembler::lookup_interface_method(Register recv_klass,
+   for (int peel = 1; peel >= 0; peel--) {
+     // %%%% Could load both offset and interface in one ldx, if they were
+     // in the opposite order.  This would save a load.
+-    ld_ptr(scan_temp, itableOffsetEntry::interface_offset_in_bytes(), method_result);
++    ld_ptr(scan_temp, in_bytes(itableOffsetEntry::interface_offset()), method_result);
+ 
+     // Check that this entry is non-null.  A null entry means that
+     // the receiver class doesn't implement the interface, and wasn't the
+@@ -2089,7 +2070,7 @@ void MacroAssembler::lookup_interface_method(Register recv_klass,
+ 
+   if (return_method) {
+     // Got a hit.
+-    int ito_offset = itableOffsetEntry::offset_offset_in_bytes();
++    int ito_offset = in_bytes(itableOffsetEntry::offset_offset());
+     // scan_temp[-scan_step] points to the vtable offset we need
+     ito_offset -= scan_step;
+     lduw(scan_temp, ito_offset, scan_temp);
+@@ -2118,7 +2099,7 @@ void MacroAssembler::lookup_virtual_method(Register recv_klass,
+   Register sethi_temp = method_result;
+   const int base = in_bytes(Klass::vtable_start_offset()) +
+                    // method pointer offset within the vtable entry:
+-                   vtableEntry::method_offset_in_bytes();
++                   in_bytes(vtableEntry::method_offset());
+   RegisterOrConstant vtable_offset = vtable_index;
+   // Each of the following three lines potentially generates an instruction.
+   // But the total number of address formation instructions will always be
+@@ -2833,7 +2814,7 @@ void MacroAssembler::load_mirror(Register mirror, Register method, Register tmp)
+   const int mirror_offset = in_bytes(Klass::java_mirror_offset());
+   ld_ptr(method, in_bytes(Method::const_offset()), mirror);
+   ld_ptr(mirror, in_bytes(ConstMethod::constants_offset()), mirror);
+-  ld_ptr(mirror, ConstantPool::pool_holder_offset_in_bytes(), mirror);
++  ld_ptr(mirror, in_bytes(ConstantPool::pool_holder_offset()), mirror);
+   ld_ptr(mirror, mirror_offset, mirror);
+   resolve_oop_handle(mirror, tmp);
+ }
+diff --git a/src/hotspot/cpu/sparc/macroAssembler_sparc.hpp b/src/hotspot/cpu/sparc/macroAssembler_sparc.hpp
+index dbef4cffa..3512fa2a3 100644
+--- a/src/hotspot/cpu/sparc/macroAssembler_sparc.hpp
++++ b/src/hotspot/cpu/sparc/macroAssembler_sparc.hpp
+@@ -305,7 +305,7 @@ class AddressLiteral {
+ 
+  protected:
+   // creation
+-  AddressLiteral() : _address(NULL), _rspec(NULL) {}
++  AddressLiteral() : _address(NULL), _rspec() {}
+ 
+  public:
+   AddressLiteral(address addr, RelocationHolder const& rspec)
+diff --git a/src/hotspot/cpu/sparc/matcher_sparc.hpp b/src/hotspot/cpu/sparc/matcher_sparc.hpp
+index 7dbaca0a6..7ae707b55 100644
+--- a/src/hotspot/cpu/sparc/matcher_sparc.hpp
++++ b/src/hotspot/cpu/sparc/matcher_sparc.hpp
+@@ -179,4 +179,14 @@
+   }
+ 
+ 
++  // true means we have fast implementation for vector test of all-true/any-true
++  static constexpr bool vectortest_needs_second_argument(bool is_alltrue, bool is_predicate) {
++    return false;
++  }
++
++  // BoolTest mask for vector test intrinsics
++  static constexpr BoolTest::mask vectortest_mask(bool is_alltrue, bool is_predicate, int vlen) {
++    return BoolTest::illegal;
++  }
++
+ #endif // CPU_SPARC_MATCHER_SPARC_HPP
+diff --git a/src/hotspot/cpu/sparc/methodHandles_sparc.cpp b/src/hotspot/cpu/sparc/methodHandles_sparc.cpp
+index d44cfe2bf..a36190ca1 100644
+--- a/src/hotspot/cpu/sparc/methodHandles_sparc.cpp
++++ b/src/hotspot/cpu/sparc/methodHandles_sparc.cpp
+@@ -250,7 +250,7 @@ address MethodHandles::generate_method_handle_interpreter_entry(MacroAssembler*
+ 
+     Label L;
+     BLOCK_COMMENT("verify_intrinsic_id {");
+-    __ lduh(Address(G5_method, Method::intrinsic_id_offset_in_bytes()), O1_scratch);
++    __ lduh(Address(G5_method, in_bytes(Method::intrinsic_id_offset())), O1_scratch);
+     __ cmp_and_br_short(O1_scratch, (int) iid, Assembler::equal, Assembler::pt, L);
+     if (iid == vmIntrinsics::_linkToVirtual ||
+         iid == vmIntrinsics::_linkToSpecial) {
+diff --git a/src/hotspot/cpu/sparc/runtime_sparc.cpp b/src/hotspot/cpu/sparc/runtime_sparc.cpp
+index 9e158e53a..596d3bc9a 100644
+--- a/src/hotspot/cpu/sparc/runtime_sparc.cpp
++++ b/src/hotspot/cpu/sparc/runtime_sparc.cpp
+@@ -69,7 +69,7 @@
+ void OptoRuntime::generate_exception_blob() {
+   // allocate space for code
+   ResourceMark rm;
+-  int pad = VerifyThread ? 256 : 0;// Extra slop space for more verify code
++  int pad = 0;
+ 
+   // setup code generation tools
+   // Measured 8/7/03 at 256 in 32bit debug build (no VerifyThread)
+diff --git a/src/hotspot/cpu/sparc/sharedRuntime_sparc.cpp b/src/hotspot/cpu/sparc/sharedRuntime_sparc.cpp
+index 46156eb94..1f30589d6 100644
+--- a/src/hotspot/cpu/sparc/sharedRuntime_sparc.cpp
++++ b/src/hotspot/cpu/sparc/sharedRuntime_sparc.cpp
+@@ -645,7 +645,7 @@ void AdapterGenerator::gen_i2c_adapter(int total_args_passed,
+   // caller, but with an uncorrected stack, causing delayed havoc.
+ 
+   if (VerifyAdapterCalls &&
+-      (Interpreter::code() != NULL || StubRoutines::code1() != NULL)) {
++      (Interpreter::code() != NULL || StubRoutines::initial_stubs_code() != NULL)) {
+     // So, let's test for cascading c2i/i2c adapters right now.
+     //  assert(Interpreter::contains($return_addr) ||
+     //         StubRoutines::contains($return_addr),
+@@ -656,13 +656,13 @@ void AdapterGenerator::gen_i2c_adapter(int total_args_passed,
+       range_check(masm, O7, O0, O1,
+                   Interpreter::code()->code_start(), Interpreter::code()->code_end(),
+                   L_ok);
+-    if (StubRoutines::code1() != NULL)
++    if (StubRoutines::initial_stubs_code() != NULL)
+       range_check(masm, O7, O0, O1,
+-                  StubRoutines::code1()->code_begin(), StubRoutines::code1()->code_end(),
++                  StubRoutines::initial_stubs_code()->code_begin(), StubRoutines::initial_stubs_code()->code_end(),
+                   L_ok);
+-    if (StubRoutines::code2() != NULL)
++    if (StubRoutines::final_stubs_code() != NULL)
+       range_check(masm, O7, O0, O1,
+-                  StubRoutines::code2()->code_begin(), StubRoutines::code2()->code_end(),
++                  StubRoutines::final_stubs_code()->code_begin(), StubRoutines::final_stubs_code()->code_end(),
+                   L_ok);
+     const char* msg = "i2c adapter must return to an interpreter frame";
+     __ block_comment(msg);
+@@ -2222,7 +2222,7 @@ nmethod* SharedRuntime::generate_native_wrapper(MacroAssembler* masm,
+ 
+   // reset handle block
+   __ ld_ptr(G2_thread, in_bytes(JavaThread::active_handles_offset()), L5);
+-  __ st(G0, L5, JNIHandleBlock::top_offset_in_bytes());
++  __ st(G0, L5, in_bytes(JNIHandleBlock::top_offset()));
+ 
+   __ ld_ptr(G2_thread, in_bytes(Thread::pending_exception_offset()), G3_scratch);
+   check_forward_pending_exception(masm, G3_scratch);
+@@ -2342,13 +2342,13 @@ static void make_new_frames(MacroAssembler* masm, bool deopt) {
+   // interpreter would need. So this stack banging should never
+   // trigger a fault. Verify that it does not on non product builds.
+   // Get total frame size for interpreted frames
+-  __ ld(O2UnrollBlock, Deoptimization::UnrollBlock::total_frame_sizes_offset_in_bytes(), O4);
++  __ ld(O2UnrollBlock, in_bytes(Deoptimization::UnrollBlock::total_frame_sizes_offset()), O4);
+   __ bang_stack_size(O4, O3, G3_scratch);
+ #endif
+ 
+-  __ ld(O2UnrollBlock, Deoptimization::UnrollBlock::number_of_frames_offset_in_bytes(), O4array_size);
+-  __ ld_ptr(O2UnrollBlock, Deoptimization::UnrollBlock::frame_pcs_offset_in_bytes(), G3pcs);
+-  __ ld_ptr(O2UnrollBlock, Deoptimization::UnrollBlock::frame_sizes_offset_in_bytes(), O3array);
++  __ ld(O2UnrollBlock, in_bytes(Deoptimization::UnrollBlock::number_of_frames_offset()), O4array_size);
++  __ ld_ptr(O2UnrollBlock, in_bytes(Deoptimization::UnrollBlock::frame_pcs_offset()), G3pcs);
++  __ ld_ptr(O2UnrollBlock, in_bytes(Deoptimization::UnrollBlock::frame_sizes_offset()), O3array);
+ 
+   // Adjust old interpreter frame to make space for new frame's extra java locals
+   //
+@@ -2361,7 +2361,7 @@ static void make_new_frames(MacroAssembler* masm, bool deopt) {
+   // for each frame we create and keep up the illusion every where.
+   //
+ 
+-  __ ld(O2UnrollBlock, Deoptimization::UnrollBlock::caller_adjustment_offset_in_bytes(), O7);
++  __ ld(O2UnrollBlock, in_bytes(Deoptimization::UnrollBlock::caller_adjustment_offset()), O7);
+   __ mov(SP, O5_savedSP);       // remember initial sender's original sp before adjustment
+   __ sub(SP, O7, SP);
+ 
+@@ -2391,7 +2391,7 @@ void SharedRuntime::generate_deopt_blob() {
+   // allocate space for the code
+   ResourceMark rm;
+   // setup code generation tools
+-  int pad = VerifyThread ? 512 : 0;// Extra slop space for more verify code
++  int pad = 0;
+ #ifdef ASSERT
+   pad += (StackOverflow::stack_shadow_zone_size() / os::vm_page_size())*16 + 32;
+ #endif
+@@ -2595,7 +2595,7 @@ void SharedRuntime::generate_deopt_blob() {
+ 
+   RegisterSaver::restore_result_registers(masm);
+ 
+-  __ ld(O2UnrollBlock, Deoptimization::UnrollBlock::unpack_kind_offset_in_bytes(), G4deopt_mode);
++  __ ld(O2UnrollBlock, in_bytes(Deoptimization::UnrollBlock::unpack_kind_offset()), G4deopt_mode);
+   Label noException;
+   __ cmp_and_br_short(G4deopt_mode, Deoptimization::Unpack_exception, Assembler::notEqual, Assembler::pt, noException);
+ 
+@@ -2652,7 +2652,7 @@ void SharedRuntime::generate_uncommon_trap_blob() {
+   // allocate space for the code
+   ResourceMark rm;
+   // setup code generation tools
+-  int pad = VerifyThread ? 512 : 0;
++  int pad = 0;
+ #ifdef ASSERT
+   pad += (StackOverflow::stack_shadow_zone_size() / os::vm_page_size())*16 + 32;
+ #endif
+@@ -2706,7 +2706,7 @@ void SharedRuntime::generate_uncommon_trap_blob() {
+ 
+ #ifdef ASSERT
+   { Label L;
+-    __ ld(O2UnrollBlock, Deoptimization::UnrollBlock::unpack_kind_offset_in_bytes(), O1);
++    __ ld(O2UnrollBlock, in_bytes(Deoptimization::UnrollBlock::unpack_kind_offset()), O1);
+     __ cmp_and_br_short(O1, Deoptimization::Unpack_uncommon_trap, Assembler::equal, Assembler::pt, L);
+     __ stop("SharedRuntime::generate_deopt_blob: expected Unpack_uncommon_trap");
+     __ bind(L);
+diff --git a/src/hotspot/cpu/sparc/smallRegisterMap_sparc.inline.hpp b/src/hotspot/cpu/sparc/smallRegisterMap_sparc.inline.hpp
+index a47215adb..ae8b9dd31 100644
+--- a/src/hotspot/cpu/sparc/smallRegisterMap_sparc.inline.hpp
++++ b/src/hotspot/cpu/sparc/smallRegisterMap_sparc.inline.hpp
+@@ -1,5 +1,5 @@
+ /*
+- * Copyright (c) 2019, 2022, Oracle and/or its affiliates. All rights reserved.
++ * Copyright (c) 2019, 2023, Oracle and/or its affiliates. All rights reserved.
+  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+  *
+  * This code is free software; you can redistribute it and/or modify it
+@@ -30,8 +30,15 @@
+ 
+ // Java frames don't have callee saved registers (except for rfp), so we can use a smaller RegisterMap
+ class SmallRegisterMap {
++  constexpr SmallRegisterMap() = default;
++  ~SmallRegisterMap() = default;
++  NONCOPYABLE(SmallRegisterMap);
++
+ public:
+-  static constexpr SmallRegisterMap* instance = nullptr;
++  static const SmallRegisterMap* instance() {
++    static constexpr SmallRegisterMap the_instance{};
++    return &the_instance;
++  }
+ private:
+   static void assert_is_rfp(VMReg r) NOT_DEBUG_RETURN
+                                      DEBUG_ONLY({ Unimplemented(); })
+@@ -46,15 +53,9 @@ public:
+     return map;
+   }
+ 
+-  SmallRegisterMap() {}
+-
+-  SmallRegisterMap(const RegisterMap* map) {
+-    Unimplemented();
+-  }
+-
+   inline address location(VMReg reg, intptr_t* sp) const {
+     Unimplemented();
+-    return NULL;
++    return nullptr;
+   }
+ 
+   inline void set_location(VMReg reg, address loc) { assert_is_rfp(reg); }
+@@ -77,7 +78,7 @@ public:
+   bool should_skip_missing() const  { return false; }
+   VMReg find_register_spilled_here(void* p, intptr_t* sp) {
+     Unimplemented();
+-    return NULL;
++    return nullptr;
+   }
+   void print() const { print_on(tty); }
+   void print_on(outputStream* st) const { st->print_cr("Small register map"); }
+diff --git a/src/hotspot/cpu/sparc/sparc.ad b/src/hotspot/cpu/sparc/sparc.ad
+index 399192e04..49837613e 100644
+--- a/src/hotspot/cpu/sparc/sparc.ad
++++ b/src/hotspot/cpu/sparc/sparc.ad
+@@ -550,7 +550,7 @@ int MachCallDynamicJavaNode::ret_addr_offset() {
+   } else {
+     assert(!UseInlineCaches, "expect vtable calls only if not using ICs");
+     int entry_offset = in_bytes(Klass::vtable_start_offset()) + vtable_index*vtableEntry::size_in_bytes();
+-    int v_off = entry_offset + vtableEntry::method_offset_in_bytes();
++    int v_off = entry_offset + in_bytes(vtableEntry::method_offset());
+     int klass_load_size;
+     if (UseCompressedClassPointers) {
+       assert(Universe::heap() != NULL, "java heap should be initialized");
+@@ -1042,10 +1042,6 @@ void MachPrologNode::format( PhaseRegAlloc *ra_, outputStream *st ) const {
+     st->print_cr("NOP"); st->print("\t");
+   }
+ 
+-  if( VerifyThread ) {
+-    st->print_cr("Verify_Thread"); st->print("\t");
+-  }
+-
+   size_t framesize = C->output()->frame_size_in_bytes();
+   int bangsize = C->output()->bang_size_in_bytes();
+ 
+@@ -1625,6 +1621,10 @@ const bool Matcher::match_rule_supported_vector(int opcode, int vlen, BasicType
+   return ret_value;  // Per default match rules are supported.
+ }
+ 
++const int Matcher::superword_max_vector_size(const BasicType bt) {
++  return Matcher::max_vector_size(bt);
++}
++
+ const bool Matcher::match_rule_supported_superword(int opcode, int vlen, BasicType bt) {
+   return match_rule_supported_vector(opcode, vlen, bt);
+ }
+@@ -2334,7 +2334,7 @@ encode %{
+         klass_load_size = 1*BytesPerInstWord;
+       }
+       int entry_offset = in_bytes(Klass::vtable_start_offset()) + vtable_index*vtableEntry::size_in_bytes();
+-      int v_off = entry_offset + vtableEntry::method_offset_in_bytes();
++      int v_off = entry_offset + in_bytes(vtableEntry::method_offset());
+       if (Assembler::is_simm13(v_off)) {
+         __ ld_ptr(G3, v_off, G5_method);
+       } else {
+diff --git a/src/hotspot/cpu/sparc/stackChunkFrameStream_sparc.inline.hpp b/src/hotspot/cpu/sparc/stackChunkFrameStream_sparc.inline.hpp
+index cb2a4a79c..850844ca0 100644
+--- a/src/hotspot/cpu/sparc/stackChunkFrameStream_sparc.inline.hpp
++++ b/src/hotspot/cpu/sparc/stackChunkFrameStream_sparc.inline.hpp
+@@ -1,5 +1,5 @@
+ /*
+- * Copyright (c) 2019, 2022, Oracle and/or its affiliates. All rights reserved.
++ * Copyright (c) 2019, 2023, Oracle and/or its affiliates. All rights reserved.
+  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+  *
+  * This code is free software; you can redistribute it and/or modify it
+@@ -46,25 +46,25 @@ inline frame StackChunkFrameStream<frame_kind>::to_frame() const {
+ template <ChunkFrames frame_kind>
+ inline address StackChunkFrameStream<frame_kind>::get_pc() const {
+   Unimplemented();
+-  return NULL;
++  return nullptr;
+ }
+ 
+ template <ChunkFrames frame_kind>
+ inline intptr_t* StackChunkFrameStream<frame_kind>::fp() const {
+   Unimplemented();
+-  return NULL;
++  return nullptr;
+ }
+ 
+ template <ChunkFrames frame_kind>
+ inline intptr_t* StackChunkFrameStream<frame_kind>::derelativize(int offset) const {
+   Unimplemented();
+-  return NULL;
++  return nullptr;
+ }
+ 
+ template <ChunkFrames frame_kind>
+ inline intptr_t* StackChunkFrameStream<frame_kind>::unextended_sp_for_interpreter_frame() const {
+   Unimplemented();
+-  return NULL;
++  return nullptr;
+ }
+ 
+ template <ChunkFrames frame_kind>
+diff --git a/src/hotspot/cpu/sparc/stubGenerator_sparc.cpp b/src/hotspot/cpu/sparc/stubGenerator_sparc.cpp
+index e7377075f..7c65f8843 100644
+--- a/src/hotspot/cpu/sparc/stubGenerator_sparc.cpp
++++ b/src/hotspot/cpu/sparc/stubGenerator_sparc.cpp
+@@ -397,9 +397,9 @@ class StubGenerator: public StubCodeGenerator {
+   address generate_throw_exception(const char* name, address runtime_entry,
+                                    Register arg1 = noreg, Register arg2 = noreg) {
+ #ifdef ASSERT
+-    int insts_size = VerifyThread ? 1 * K : 600;
++    int insts_size = 600;
+ #else
+-    int insts_size = VerifyThread ? 1 * K : 256;
++    int insts_size = 256;
+ #endif /* ASSERT */
+     int locs_size  = 32;
+ 
+@@ -424,7 +424,6 @@ class StubGenerator: public StubCodeGenerator {
+     Register last_java_sp = SP;
+     // 64-bit last_java_sp is biased!
+     __ set_last_Java_frame(last_java_sp, G0);
+-    if (VerifyThread)  __ mov(G2_thread, O0); // about to be smashed; pass early
+     __ save_thread(noreg);
+     if (arg1 != noreg) {
+       assert(arg2 != O1, "clobbered");
+@@ -436,10 +435,7 @@ class StubGenerator: public StubCodeGenerator {
+     // do the call
+     BLOCK_COMMENT("call runtime_entry");
+     __ call(runtime_entry, relocInfo::runtime_call_type);
+-    if (!VerifyThread)
+-      __ delayed()->mov(G2_thread, O0);  // pass thread as first argument
+-    else
+-      __ delayed()->nop();             // (thread already passed)
++    __ delayed()->mov(G2_thread, O0);  // pass thread as first argument
+     __ restore_thread(noreg);
+     __ reset_last_Java_frame();
+ 
+@@ -5729,14 +5725,21 @@ class StubGenerator: public StubCodeGenerator {
+   }
+ 
+  public:
+-  StubGenerator(CodeBuffer* code, int phase) : StubCodeGenerator(code) {
+-    _stub_count = phase == 0 ? 0x100 : 0x200;
+-    if (phase == 0) {
++  StubGenerator(CodeBuffer* code, StubsKind kind) : StubCodeGenerator(code) {
++    _stub_count = kind == Initial_stubs ? 0x100 : 0x200;
++    switch (kind) {
++    case Initial_stubs:
+       generate_initial();
+-    } else if (phase == 1) {
+-      return; // no continuation stubs on SPARC
+-    } else {
++      break;
++    case Continuation_stubs:
++    case Compiler_stubs:
++      return; // compiler stubs are part of the final stubs
++    case Final_stubs:
+       generate_all();
++      break;
++    default:
++      fatal("unexpected stubs kind: %d", kind);
++      break;
+     }
+ 
+     // make sure this stub is available for all local calls
+@@ -5781,9 +5784,9 @@ class StubGenerator: public StubCodeGenerator {
+ }; // end class declaration
+ 
+ #define UCM_TABLE_MAX_ENTRIES 8
+-void StubGenerator_generate(CodeBuffer* code, int phase) {
++void StubGenerator_generate(CodeBuffer* code, StubCodeGenerator::StubsKind kind) {
+   if (UnsafeCopyMemory::_table == NULL) {
+     UnsafeCopyMemory::create_table(UCM_TABLE_MAX_ENTRIES);
+   }
+-  StubGenerator g(code, phase);
++  StubGenerator g(code, kind);
+ }
+diff --git a/src/hotspot/cpu/sparc/stubRoutines_sparc.hpp b/src/hotspot/cpu/sparc/stubRoutines_sparc.hpp
+index 066697012..8d22a6ec6 100644
+--- a/src/hotspot/cpu/sparc/stubRoutines_sparc.hpp
++++ b/src/hotspot/cpu/sparc/stubRoutines_sparc.hpp
+@@ -40,8 +40,10 @@ static bool returns_to_call_stub(address return_pc)   {
+ 
+ enum /* platform_dependent_constants */ {
+   // %%%%%%%% May be able to shrink this a lot
+-  code_size1 = 20000,           // simply increase if too small (assembler will crash if too small)
+-  code_size2 = 29000            // simply increase if too small (assembler will crash if too small)
++  _initial_stubs_code_size      = 20000, // simply increase if too small (assembler will crash if too small)
++  _continuation_stubs_code_size =     0,
++  _compiler_stubs_code_size     =     0,
++  _final_stubs_code_size        = 29000  // simply increase if too small (assembler will crash if too small)
+ };
+ 
+ class Sparc {
+diff --git a/src/hotspot/cpu/sparc/templateInterpreterGenerator_sparc.cpp b/src/hotspot/cpu/sparc/templateInterpreterGenerator_sparc.cpp
+index 24effa149..fbd901218 100644
+--- a/src/hotspot/cpu/sparc/templateInterpreterGenerator_sparc.cpp
++++ b/src/hotspot/cpu/sparc/templateInterpreterGenerator_sparc.cpp
+@@ -35,6 +35,7 @@
+ #include "oops/methodData.hpp"
+ #include "oops/method.hpp"
+ #include "oops/oop.inline.hpp"
++#include "oops/resolvedIndyEntry.hpp"
+ #include "prims/jvmtiExport.hpp"
+ #include "prims/jvmtiThreadState.hpp"
+ #include "runtime/arguments.hpp"
+@@ -296,12 +297,16 @@ address TemplateInterpreterGenerator::generate_return_entry_for(TosState state,
+ 
+   const Register cache = G3_scratch;
+   const Register index  = G1_scratch;
+-  __ get_cache_and_index_at_bcp(cache, index, 1, index_size);
+-
+-  const Register flags = cache;
+-  __ ld_ptr(cache, ConstantPoolCache::base_offset() + ConstantPoolCacheEntry::flags_offset(), flags);
+-  const Register parameter_size = flags;
+-  __ and3(flags, ConstantPoolCacheEntry::parameter_size_mask, parameter_size);  // argument size in words
++  const Register parameter_size = cache;
++  if (index_size == sizeof(u4)) {
++    __ load_resolved_indy_entry(cache, index);
++    __ lduh(cache, in_bytes(ResolvedIndyEntry::num_parameters_offset()), parameter_size);
++  } else {
++    __ get_cache_and_index_at_bcp(cache, index, 1, index_size);
++    const Register flags = cache;
++    __ ld_ptr(cache, ConstantPoolCache::base_offset() + ConstantPoolCacheEntry::flags_offset(), flags);
++    __ and3(flags, ConstantPoolCacheEntry::parameter_size_mask, parameter_size);  // argument size in words
++  }
+   __ sll(parameter_size, Interpreter::logStackElementSize, parameter_size);     // each argument size in bytes
+   __ add(Lesp, parameter_size, Lesp);                                           // pop arguments
+ 
+@@ -483,7 +488,7 @@ void TemplateInterpreterGenerator::lock_method() {
+   }
+ 
+   __ add_monitor_to_stack(true, noreg, noreg);  // allocate monitor elem
+-  __ st_ptr( O0, Lmonitors, BasicObjectLock::obj_offset_in_bytes());   // store object
++  __ st_ptr( O0, Lmonitors, in_bytes(BasicObjectLock::obj_offset()));   // store object
+   // __ untested("lock_object from method entry");
+   __ lock_object(Lmonitors, O0);
+ }
+@@ -991,6 +996,11 @@ address TemplateInterpreterGenerator::generate_CRC32C_updateBytes_entry(Abstract
+ }
+ 
+ // Not supported
++address TemplateInterpreterGenerator::generate_currentThread() { return nullptr; }
++address TemplateInterpreterGenerator::generate_Float_intBitsToFloat_entry() { return nullptr; }
++address TemplateInterpreterGenerator::generate_Float_floatToRawIntBits_entry() { return nullptr; }
++address TemplateInterpreterGenerator::generate_Double_longBitsToDouble_entry() { return nullptr; }
++address TemplateInterpreterGenerator::generate_Double_doubleToRawLongBits_entry() { return nullptr; }
+ address TemplateInterpreterGenerator::generate_Float_float16ToFloat_entry() { return nullptr; }
+ address TemplateInterpreterGenerator::generate_Float_floatToFloat16_entry() { return nullptr; }
+ 
+@@ -1392,7 +1402,7 @@ address TemplateInterpreterGenerator::generate_native_entry(bool synchronized) {
+ 
+   // reset handle block
+   __ ld_ptr(G2_thread, JavaThread::active_handles_offset(), G3_scratch);
+-  __ st(G0, G3_scratch, JNIHandleBlock::top_offset_in_bytes());
++  __ st(G0, G3_scratch, in_bytes(JNIHandleBlock::top_offset()));
+ 
+   // If we have an oop result store it where it will be safe for any further gc
+   // until we return now that we've released the handle it might be protected by
+diff --git a/src/hotspot/cpu/sparc/templateTable_sparc.cpp b/src/hotspot/cpu/sparc/templateTable_sparc.cpp
+index 9206596f3..ddcc589fc 100644
+--- a/src/hotspot/cpu/sparc/templateTable_sparc.cpp
++++ b/src/hotspot/cpu/sparc/templateTable_sparc.cpp
+@@ -32,6 +32,7 @@
+ #include "interpreter/templateTable.hpp"
+ #include "memory/universe.hpp"
+ #include "oops/methodData.hpp"
++#include "oops/resolvedIndyEntry.hpp"
+ #include "oops/objArrayKlass.hpp"
+ #include "oops/oop.inline.hpp"
+ #include "prims/jvmtiExport.hpp"
+@@ -1659,7 +1660,7 @@ void TemplateTable::branch(bool is_jsr, bool is_wide) {
+     __ br_null_short(O0, Assembler::pn, Lforward);
+ 
+     // Has the nmethod been invalidated already?
+-    __ ldub(O0, nmethod::state_offset(), O2);
++    __ ldub(O0, in_bytes(nmethod::state_offset()), O2);
+     __ cmp_and_br_short(O2, nmethod::in_use, Assembler::notEqual, Assembler::pn, Lforward);
+ 
+     // migrate the interpreter frame off of the stack
+@@ -2119,7 +2120,7 @@ void TemplateTable::load_invoke_cp_cache_entry(int byte_no,
+     __ get_cache_and_index_at_bcp(cache, index, 1);
+     __ ld_ptr(Address(cache, method_offset), method);
+   } else {
+-    size_t index_size = (is_invokedynamic ? sizeof(u4) : sizeof(u2));
++    size_t index_size = sizeof(u2);
+     resolve_cache_and_index(byte_no, cache, index, index_size);
+     __ ld_ptr(Address(cache, method_offset), method);
+   }
+@@ -2954,7 +2955,7 @@ void TemplateTable::prepare_invoke(int byte_no,
+   __ mov(SP, O5_savedSP);  // record SP that we wanted the callee to restore
+ 
+   // maybe push appendix to arguments
+-  if (is_invokedynamic || is_invokehandle) {
++  if (is_invokehandle) {
+     Label L_no_push;
+     __ set((1 << ConstantPoolCacheEntry::has_appendix_shift), temp);
+     __ btst(flags, temp);
+@@ -3238,7 +3239,7 @@ void TemplateTable::invokeinterface(int byte_no) {
+   // Get declaring interface class from method
+   __ ld_ptr(Rmethod, Method::const_offset(), Rinterface);
+   __ ld_ptr(Rinterface, ConstMethod::constants_offset(), Rinterface);
+-  __ ld_ptr(Rinterface, ConstantPool::pool_holder_offset_in_bytes(), Rinterface);
++  __ ld_ptr(Rinterface, in_bytes(ConstantPool::pool_holder_offset()), Rinterface);
+ 
+   // Get itable index from method
+   const Register Rindex = G5_method;
+@@ -3303,27 +3304,78 @@ void TemplateTable::invokehandle(int byte_no) {
+ }
+ 
+ 
++// The return address is left in Lscratch for invokedynamic().
++void TemplateTable::load_invokedynamic_entry(Register method) {
++  const Register ra       = Lscratch;
++  const Register appendix = G4_scratch;
++  const Register cache    = G3_scratch;
++  const Register index    = O2;
++  assert_different_registers(method, ra, appendix, cache, index, O1);
++
++  Label resolved;
++  __ load_resolved_indy_entry(cache, index);
++  __ ld_ptr(cache, in_bytes(ResolvedIndyEntry::method_offset()), method);
++  __ br_notnull_short(method, Assembler::pt, resolved);
++
++  Bytecodes::Code code = bytecode();
++  // Call to the interpreter runtime to resolve invokedynamic
++  address entry = CAST_FROM_FN_PTR(address, InterpreterRuntime::resolve_from_cache);
++  __ set(code, O1);
++  __ call_VM(noreg, entry, O1);
++  // Update registers with resolved info
++  __ load_resolved_indy_entry(cache, index);
++  __ ld_ptr(cache, in_bytes(ResolvedIndyEntry::method_offset()), method);
++#ifdef ASSERT
++  __ br_notnull_short(method, Assembler::pt, resolved);
++  __ stop("Should be resolved by now");
++#endif // ASSERT
++  __ bind(resolved);
++
++  __ mov(SP, O5_savedSP);  // record SP that we wanted the callee to restore
++
++  Label L_no_push;
++  // Check if there is an appendix
++  __ ldub(cache, in_bytes(ResolvedIndyEntry::flags_offset()), index);
++  __ btst((1 << ResolvedIndyEntry::has_appendix_shift), index);
++  __ br(Assembler::zero, false, Assembler::pt, L_no_push);
++  __ delayed()->nop();
++  // Push the appendix as a trailing parameter
++  // since the parameter_size includes it.
++  __ lduh(cache, in_bytes(ResolvedIndyEntry::resolved_references_index_offset()), index);
++  __ load_resolved_reference_at_index(appendix, index, /*tmp*/ O0);
++  __ verify_oop(appendix);
++  __ push_ptr(appendix);  // push appendix (MethodType, CallSite, etc.)
++  __ bind(L_no_push);
++
++  // compute return type
++  __ ldub(cache, in_bytes(ResolvedIndyEntry::result_type_offset()), ra);
++  // load return address
++  {
++    const address table_addr = (address) Interpreter::invoke_return_entry_table_for(code);
++    AddressLiteral table(table_addr);
++    __ set(table, index);
++    __ sll(ra, LogBytesPerWord, ra);
++    __ ld_ptr(Address(index, ra), ra);
++  }
++}
++
+ void TemplateTable::invokedynamic(int byte_no) {
+   transition(vtos, vtos);
+   assert(byte_no == f1_byte, "use this argument");
+ 
+   const Register Rret        = Lscratch;
+-  const Register G4_callsite = G4_scratch;
+   const Register Rscratch    = G3_scratch;
+ 
+-  prepare_invoke(byte_no, G5_method, Rret, G4_callsite);
+-
+-  // G4: CallSite object (from cpool->resolved_references[f1])
+-  // G5: MH.linkToCallSite method (from f2)
++  load_invokedynamic_entry(G5_method);
+ 
+-  // Note:  G4_callsite is already pushed by prepare_invoke
++  // G5: MH.linkToCallSite method
++  // The CallSite appendix, if any, is already pushed by load_invokedynamic_entry
+ 
+   // %%% should make a type profile for any invokedynamic that takes a ref argument
+   // profile this call
+   __ profile_call(O4);
+ 
+   // do the call
+-  __ verify_oop(G4_callsite);
+   __ profile_arguments_type(G5_method, Rscratch, Gargs, false);
+   __ call_from_interpreter(Rscratch, Gargs, Rret);
+ }
+@@ -3690,7 +3742,7 @@ void TemplateTable::monitorenter() {
+ 
+     __ cmp( O3, O2 );
+     __ brx( Assembler::lessEqualUnsigned, true, Assembler::pt, loop );
+-    __ delayed()->ld_ptr(O3, BasicObjectLock::obj_offset_in_bytes(), O4);
++    __ delayed()->ld_ptr(O3, in_bytes(BasicObjectLock::obj_offset()), O4);
+ 
+     __ bind( exit );
+   }
+@@ -3710,7 +3762,7 @@ void TemplateTable::monitorenter() {
+   // The object has already been popped from the stack, so the expression stack looks correct.
+   __ inc(Lbcp);
+ 
+-  __ st_ptr(O0, O1, BasicObjectLock::obj_offset_in_bytes()); // store object
++  __ st_ptr(O0, O1, in_bytes(BasicObjectLock::obj_offset())); // store object
+   __ lock_object(O1, O0);
+ 
+   // check if there's enough space on the stack for the monitors after locking
+@@ -3749,7 +3801,7 @@ void TemplateTable::monitorexit() {
+ 
+     __ cmp( Lscratch, O2 );
+     __ brx( Assembler::lessEqualUnsigned, true, Assembler::pt, loop );
+-    __ delayed()->ld_ptr(Lscratch, BasicObjectLock::obj_offset_in_bytes(), O4);
++    __ delayed()->ld_ptr(Lscratch, in_bytes(BasicObjectLock::obj_offset()), O4);
+ 
+     call_VM(noreg, CAST_FROM_FN_PTR(address, InterpreterRuntime::throw_illegal_monitor_state_exception));
+     __ should_not_reach_here();
+diff --git a/src/hotspot/cpu/sparc/vmstorage_sparc.hpp b/src/hotspot/cpu/sparc/vmstorage_sparc.hpp
+index c8531d4c0..f3c32e87a 100644
+--- a/src/hotspot/cpu/sparc/vmstorage_sparc.hpp
++++ b/src/hotspot/cpu/sparc/vmstorage_sparc.hpp
+@@ -44,7 +44,7 @@ constexpr inline StorageType VMStorage::stack_type() { return StorageType::STACK
+ constexpr inline StorageType VMStorage::placeholder_type() { return StorageType::PLACEHOLDER; }
+ constexpr inline StorageType VMStorage::frame_data_type() { return StorageType::FRAME_DATA; }
+ 
+-inline VMStorage as_VMStorage(VMReg reg) {
++inline VMStorage as_VMStorage(VMReg reg, BasicType bt) {
+   ShouldNotReachHere();
+   return VMStorage::invalid();
+ }
+diff --git a/src/hotspot/share/code/nmethod.cpp b/src/hotspot/share/code/nmethod.cpp
+index 8717d178b..3faf171dc 100644
+--- a/src/hotspot/share/code/nmethod.cpp
++++ b/src/hotspot/share/code/nmethod.cpp
+@@ -1800,7 +1800,9 @@ void nmethod::follow_nmethod(OopIterateClosure* cl) {
+   mark_as_maybe_on_stack();
+ 
+   BarrierSetNMethod* bs_nm = BarrierSet::barrier_set()->barrier_set_nmethod();
+-  bs_nm->disarm(this);
++  if (bs_nm != nullptr) {
++    bs_nm->disarm(this);
++  }
+ 
+   // There's an assumption made that this function is not used by GCs that
+   // relocate objects, and therefore we don't call fix_oop_relocations.
+diff --git a/src/hotspot/share/gc/shared/barrierSet.cpp b/src/hotspot/share/gc/shared/barrierSet.cpp
+index c3a0c9cbb..d66377ab0 100644
+--- a/src/hotspot/share/gc/shared/barrierSet.cpp
++++ b/src/hotspot/share/gc/shared/barrierSet.cpp
+@@ -59,7 +59,11 @@ static BarrierSetNMethod* select_barrier_set_nmethod(BarrierSetNMethod* barrier_
+   } else {
+     // The GC needs nmethod entry barriers to deal with continuations
+     // and code cache unloading
++#ifdef SPARC
++    return nullptr;
++#else
+     return new BarrierSetNMethod();
++#endif
+   }
+ }
+ 

@@ -1,0 +1,5 @@
+-p1 jdk21u-jdk-21.0.13.0.2-ga/restore_os_cpu_linux_sparc.patch
+-p1 jdk21u-jdk-21.0.13.0.2-ga/linux-sparc-1.patch
+-p1 jdk21u-jdk-21.0.13.0.2-ga/linux-sparc-19u.patch
+-p1 jdk21u-jdk-21.0.13.0.2-ga/linux-sparc-20.patch
+-p1 jdk21u-jdk-21.0.13.0.2-ga/linux-sparc-21.patch
