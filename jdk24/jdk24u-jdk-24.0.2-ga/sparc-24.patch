@@ -1348,7 +1348,7 @@ index 292991db4..40e17648e 100644
  
  #endif // COMPILER2
 diff --git a/src/hotspot/cpu/sparc/macroAssembler_sparc.cpp b/src/hotspot/cpu/sparc/macroAssembler_sparc.cpp
-index d2e60b5c4..a11f5bd33 100644
+index d2e60b5c4..87afa7507 100644
 --- a/src/hotspot/cpu/sparc/macroAssembler_sparc.cpp
 +++ b/src/hotspot/cpu/sparc/macroAssembler_sparc.cpp
 @@ -2493,7 +2493,7 @@ void MacroAssembler::compiler_lock_object(Register Roop, Register Rmark,
@@ -1360,16 +1360,53 @@ index d2e60b5c4..a11f5bd33 100644
     cas_ptr(Rmark, G0, Rscratch);
     andcc(Rscratch, Rscratch, G0);             // set ICCs for done: icc.zf iff success
     // set icc.zf : 1=success 0=failure
-@@ -2557,7 +2557,7 @@ void MacroAssembler::compiler_unlock_object(Register Roop, Register Rmark,
+@@ -2528,36 +2528,29 @@ void MacroAssembler::compiler_unlock_object(Register Roop, Register Rmark,
+    delayed()->nop();
+ 
+    // It's inflated
+-   // Conceptually we need a #loadstore|#storestore "release" MEMBAR before
+-   // the ST of 0 into _owner which releases the lock.  This prevents loads
+-   // and stores within the critical section from reordering (floating)
+-   // past the store that releases the lock.  But TSO is a strong memory model
+-   // and that particular flavor of barrier is a noop, so we can safely elide it.
+-   // Note that we use 1-0 locking by default for the inflated case.  We
+-   // close the resultant (and rare) race by having contended threads in
+-   // monitorenter periodically poll _owner.
+-
+-   // 1-0 form : avoids CAS and MEMBAR in the common case
+-   // Do not bother to ratify that m->Owner == Self.
+    ld_ptr(Address(Rmark, OM_OFFSET_NO_MONITOR_VALUE_TAG(recursions)), Rbox);
+    orcc(Rbox, G0, G0);
+    brx(Assembler::notZero, false, Assembler::pn, done);
+-   delayed()->
++   delayed()->nop();
++
++   // Release the lock (TSO: no barrier needed before the store), then fence
++   // before looking for waiters so that none can be stranded.
++   st_ptr(G0, Address(Rmark, OM_OFFSET_NO_MONITOR_VALUE_TAG(owner)));
++   membar(StoreLoad);
+    ld_ptr(Address(Rmark, OM_OFFSET_NO_MONITOR_VALUE_TAG(EntryList)), Rscratch);
+    ld_ptr(Address(Rmark, OM_OFFSET_NO_MONITOR_VALUE_TAG(cxq)), Rbox);
+    orcc(Rbox, Rscratch, G0);
+    brx(Assembler::zero, false, Assembler::pt, done);
+-   delayed()->
+-   st_ptr(G0, Address(Rmark, OM_OFFSET_NO_MONITOR_VALUE_TAG(owner)));
++   delayed()->nop();
+ 
+-   membar(StoreLoad);
+    // Check that _succ is (or remains) non-zero
+    ld_ptr(Address(Rmark, OM_OFFSET_NO_MONITOR_VALUE_TAG(succ)), Rscratch);
+    andcc(Rscratch, Rscratch, G0);
     brx(Assembler::notZero, false, Assembler::pt, done);
     delayed()->andcc(G0, G0, G0);
++   // Waiters but no successor: reacquire and let the slow path wake one.
     add(Rmark, OM_OFFSET_NO_MONITOR_VALUE_TAG(owner), Rmark);
 -   mov(G2_thread, Rscratch);
 +   ld_ptr(G2_thread, in_bytes(JavaThread::monitor_owner_id_offset()), Rscratch);
     cas_ptr(Rmark, G0, Rscratch);
     cmp(Rscratch, G0);
     // invert icc.zf and goto done
-@@ -2823,7 +2823,7 @@ void MacroAssembler::reserved_stack_check() {
+@@ -2823,7 +2816,7 @@ void MacroAssembler::reserved_stack_check() {
  
    call_VM_leaf(L0, CAST_FROM_FN_PTR(address, SharedRuntime::enable_stack_reserved_zone), G2_thread);
  
@@ -1378,7 +1415,7 @@ index d2e60b5c4..a11f5bd33 100644
    jump_to(stub, G4_scratch);
    delayed()->restore();
  
-@@ -3034,12 +3034,10 @@ void MacroAssembler::encode_klass_not_null(Register r) {
+@@ -3034,12 +3027,10 @@ void MacroAssembler::encode_klass_not_null(Register r) {
      set((intptr_t)CompressedKlassPointers::base(), G6_heapbase);
      sub(r, G6_heapbase, r);
      if (CompressedKlassPointers::shift() != 0) {
@@ -1392,7 +1429,7 @@ index d2e60b5c4..a11f5bd33 100644
      srlx(r, CompressedKlassPointers::shift(), r);
    }
  }
-@@ -3053,11 +3051,10 @@ void MacroAssembler::encode_klass_not_null(Register src, Register dst) {
+@@ -3053,11 +3044,10 @@ void MacroAssembler::encode_klass_not_null(Register src, Register dst) {
        set((intptr_t)CompressedKlassPointers::base(), dst);
        sub(src, dst, dst);
        if (CompressedKlassPointers::shift() != 0) {
@@ -1405,7 +1442,7 @@ index d2e60b5c4..a11f5bd33 100644
        srlx(src, CompressedKlassPointers::shift(), dst);
      }
    }
-@@ -3072,7 +3069,7 @@ int MacroAssembler::instr_size_for_decode_klass_not_null() {
+@@ -3072,7 +3062,7 @@ int MacroAssembler::instr_size_for_decode_klass_not_null() {
    if (CompressedKlassPointers::base() != NULL) {
      // set + add + set
      num_instrs += insts_for_internal_set((intptr_t)CompressedKlassPointers::base()) +
@@ -1414,7 +1451,7 @@ index d2e60b5c4..a11f5bd33 100644
      if (CompressedKlassPointers::shift() != 0) {
        num_instrs += 1;  // sllx
      }
-@@ -3090,11 +3087,10 @@ void  MacroAssembler::decode_klass_not_null(Register r) {
+@@ -3090,11 +3080,10 @@ void  MacroAssembler::decode_klass_not_null(Register r) {
      assert(r != G6_heapbase, "bad register choice");
      set((intptr_t)CompressedKlassPointers::base(), G6_heapbase);
      if (CompressedKlassPointers::shift() != 0)
@@ -1427,7 +1464,7 @@ index d2e60b5c4..a11f5bd33 100644
      sllx(r, CompressedKlassPointers::shift(), r);
    }
  }
-@@ -3110,7 +3106,7 @@ void  MacroAssembler::decode_klass_not_null(Register src, Register dst) {
+@@ -3110,7 +3099,7 @@ void  MacroAssembler::decode_klass_not_null(Register src, Register dst) {
        if (CompressedKlassPointers::shift() != 0) {
          assert((src != G6_heapbase) && (dst != G6_heapbase), "bad register choice");
          set((intptr_t)CompressedKlassPointers::base(), G6_heapbase);
@@ -1436,7 +1473,7 @@ index d2e60b5c4..a11f5bd33 100644
          add(dst, G6_heapbase, dst);
          reinit_heapbase();
        } else {
-@@ -3119,7 +3115,6 @@ void  MacroAssembler::decode_klass_not_null(Register src, Register dst) {
+@@ -3119,7 +3108,6 @@ void  MacroAssembler::decode_klass_not_null(Register src, Register dst) {
        }
      } else {
        // shift/mov src into dst.
@@ -1444,7 +1481,7 @@ index d2e60b5c4..a11f5bd33 100644
        sllx(src, CompressedKlassPointers::shift(), dst);
      }
    }
-@@ -3128,9 +3123,9 @@ void  MacroAssembler::decode_klass_not_null(Register src, Register dst) {
+@@ -3128,9 +3116,9 @@ void  MacroAssembler::decode_klass_not_null(Register src, Register dst) {
  void MacroAssembler::reinit_heapbase() {
    if (UseCompressedOops || UseCompressedClassPointers) {
      if (Universe::heap() != NULL) {
