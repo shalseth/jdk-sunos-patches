@@ -17,3 +17,4 @@
 -p1 jdk21u-jdk-21.0.13.0.2-ga/sparc-19u.patch
 -p1 jdk21u-jdk-21.0.13.0.2-ga/sparc-20.patch
 -p1 jdk21u-jdk-21.0.13.0.2-ga/sparc-21.patch
+-p1 jdk21u-jdk-21.0.13.0.2-ga/sparc-verified-entry.patch
