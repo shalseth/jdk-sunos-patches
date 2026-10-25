@@ -19,3 +19,4 @@
 -p1 jdk22u-jdk-22.0.2-ga/sparc-21.patch
 -p1 jdk22u-jdk-22.0.2-ga/sparc-verified-entry.patch
 -p1 jdk22u-jdk-22.0.2-ga/sparc-22.patch
+-p1 jdk22u-jdk-22.0.2-ga/sparc-nmethod-barrier.patch
