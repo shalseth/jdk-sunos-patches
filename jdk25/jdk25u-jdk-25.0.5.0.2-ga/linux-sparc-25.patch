@@ -1,0 +1,415 @@
+diff --git a/src/hotspot/os_cpu/linux_sparc/javaThread_linux_sparc.cpp b/src/hotspot/os_cpu/linux_sparc/javaThread_linux_sparc.cpp
+index 176cfac12..44cf04ab9 100644
+--- a/src/hotspot/os_cpu/linux_sparc/javaThread_linux_sparc.cpp
++++ b/src/hotspot/os_cpu/linux_sparc/javaThread_linux_sparc.cpp
+@@ -22,7 +22,6 @@
+  *
+  */
+ 
+-#include "precompiled.hpp"
+ #include "runtime/frame.inline.hpp"
+ #include "runtime/javaThread.inline.hpp"
+ 
+@@ -30,7 +29,7 @@ frame JavaThread::pd_last_frame() {
+   assert(has_last_Java_frame(), "must have last_Java_sp() when suspended");
+   assert(_anchor.walkable(), "thread has not dumped its register windows yet");
+ 
+-  assert(_anchor.last_Java_pc() != NULL, "Ack no pc!");
++  assert(_anchor.last_Java_pc() != nullptr, "Ack no pc!");
+   return frame(last_Java_sp(), frame::unpatchable, _anchor.last_Java_pc());
+ }
+ 
+@@ -73,8 +72,8 @@ bool JavaThread::pd_get_top_frame_for_signal_handler(frame* fr_addr,
+   intptr_t* ret_sp;
+   address addr =
+     os::fetch_frame_from_context(uc, &ret_sp,
+-                                 NULL /* ret_fp only used on X86 */);
+-  if (addr == NULL || ret_sp == NULL) {
++                                 nullptr /* ret_fp only used on X86 */);
++  if (addr == nullptr || ret_sp == nullptr) {
+     // ucontext wasn't useful
+     return false;
+   }
+diff --git a/src/hotspot/os_cpu/linux_sparc/javaThread_linux_sparc.hpp b/src/hotspot/os_cpu/linux_sparc/javaThread_linux_sparc.hpp
+index d07110dca..a9a4c8ac3 100644
+--- a/src/hotspot/os_cpu/linux_sparc/javaThread_linux_sparc.hpp
++++ b/src/hotspot/os_cpu/linux_sparc/javaThread_linux_sparc.hpp
+@@ -29,7 +29,7 @@
+ 
+   void pd_initialize() {
+     _anchor.clear();
+-    _base_of_stack_pointer        = NULL;
++    _base_of_stack_pointer        = nullptr;
+   }
+ 
+   frame pd_last_frame();
+diff --git a/src/hotspot/os_cpu/linux_sparc/linux_sparc.S b/src/hotspot/os_cpu/linux_sparc/linux_sparc.S
+index 33474ecd9..ffd5a003f 100644
+--- a/src/hotspot/os_cpu/linux_sparc/linux_sparc.S
++++ b/src/hotspot/os_cpu/linux_sparc/linux_sparc.S
+@@ -21,18 +21,6 @@
+ # questions.
+ #
+ 
+-    # Possibilities:
+-    # -- membar
+-    # -- CAS (SP + BIAS, G0, G0)
+-    # -- wr %g0, %asi
+-
+-    .globl SpinPause
+-    .type   SpinPause,@function
+-    .align  32
+-SpinPause:      
+-    retl
+-    mov %g0, %o0
+-
+    .globl _Copy_conjoint_jlongs_atomic
+    .type   _Copy_conjoint_jlongs_atomic,@function
+ _Copy_conjoint_jlongs_atomic:
+@@ -66,4 +54,4 @@ _Copy_conjoint_jlongs_atomic:
+  _flush_reg_windows:
+         ta 0x03
+         retl
+-        mov     %fp, %o0
++        add     %fp, 2047, %o0          ! unbias, as the generated stub does
+diff --git a/src/hotspot/os_cpu/linux_sparc/os_linux_sparc.cpp b/src/hotspot/os_cpu/linux_sparc/os_linux_sparc.cpp
+index 1a91a61ab..a46159c19 100644
+--- a/src/hotspot/os_cpu/linux_sparc/os_linux_sparc.cpp
++++ b/src/hotspot/os_cpu/linux_sparc/os_linux_sparc.cpp
+@@ -49,6 +49,7 @@
+ #include "runtime/stubRoutines.hpp"
+ #include "runtime/javaThread.hpp"
+ #include "runtime/timer.hpp"
++#include "runtime/vm_version.hpp"
+ #include "signals_posix.hpp"
+ #include "utilities/debug.hpp"
+ #include "utilities/events.hpp"
+@@ -86,31 +87,36 @@ address os::fetch_frame_from_context(const void* ucVoid,
+   const ucontext_t* uc = (const ucontext_t*) ucVoid;
+   address  epc;
+ 
+-  if (uc != NULL) {
++  if (uc != nullptr) {
+     epc = os::Posix::ucontext_get_pc(uc);
+     if (ret_sp) {
+       *ret_sp = os::Linux::ucontext_get_sp(uc);
+     }
+     if (ret_fp) {
+-      *ret_fp = (intptr_t*)NULL;
++      *ret_fp = (intptr_t*)nullptr;
+     }
+   } else {
+     // construct empty ExtendedPC for return value checking
+-    epc = NULL;
++    epc = nullptr;
+     if (ret_sp) {
+-      *ret_sp = (intptr_t*) NULL;
++      *ret_sp = (intptr_t*) nullptr;
+     }
+     if (ret_fp) {
+-      *ret_fp = (intptr_t*) NULL;
++      *ret_fp = (intptr_t*) nullptr;
+     }
+   }
+ 
+   return epc;
+ }
+ 
++intptr_t* os::fetch_bcp_from_context(const void* ucVoid) {
++  ShouldNotCallThis(); // JFR only takes safepoint biased samples on SPARC
++  return nullptr;
++}
++
+ frame os::fetch_frame_from_context(const void* ucVoid) {
+   intptr_t* sp;
+-  address epc = fetch_frame_from_context(ucVoid, &sp, NULL);
++  address epc = fetch_frame_from_context(ucVoid, &sp, nullptr);
+   return frame(sp, frame::unpatchable, epc);
+ }
+ 
+@@ -137,7 +143,7 @@ frame os::current_frame() {
+                 CAST_FROM_FN_PTR(address, os::current_frame));
+   if (os::is_first_C_frame(&myframe)) {
+     // stack is not walkable
+-    return frame(NULL, frame::unpatchable, NULL);
++    return frame(nullptr, frame::unpatchable, nullptr);
+   } else {
+     return os::get_sender_for_C_frame(&myframe);
+   }
+@@ -158,7 +164,7 @@ char* os::non_memory_address_word() {
+ }
+ 
+ void os::print_context(outputStream *st, const void *context) {
+-  if (context == NULL) return;
++  if (context == nullptr) return;
+ 
+   const ucontext_t* uc = (const ucontext_t*)context;
+   sigcontext* sc = (sigcontext*)context;
+@@ -277,7 +283,7 @@ intptr_t* os::Linux::ucontext_get_sp(const ucontext_t *uc) {
+ // not used on Sparc
+ intptr_t* os::Linux::ucontext_get_fp(const ucontext_t *uc) {
+   ShouldNotReachHere();
+-  return NULL;
++  return nullptr;
+ }
+ 
+ // Utility functions
+@@ -297,7 +303,7 @@ inline static bool checkByteBuffer(address pc, address npc, JavaThread * thread,
+   CodeBlob* cb = CodeCache::find_blob(pc);
+   nmethod* nm = cb->as_nmethod_or_null();
+   bool is_unsafe_arraycopy = (thread->doing_unsafe_access() && UnsafeMemoryAccess::contains_pc(pc));
+-  if ((nm != NULL && nm->has_unsafe_access()) || is_unsafe_arraycopy) {
++  if ((nm != nullptr && nm->has_unsafe_access()) || is_unsafe_arraycopy) {
+     if (is_unsafe_arraycopy) {
+       npc = UnsafeMemoryAccess::page_error_continue_pc(pc);
+     }
+@@ -383,12 +389,12 @@ bool PosixSignals::pd_hotspot_signal_handler(int sig, siginfo_t* info,
+                                              ucontext_t* uc, JavaThread* thread) {
+ 
+   // decide if this trap can be handled by a stub
+-  address stub = NULL;
+-  address pc = NULL;
+-  address npc = NULL;
++  address stub = nullptr;
++  address pc = nullptr;
++  address npc = nullptr;
+ 
+   //%note os_trap_1
+-  if (info != NULL && uc != NULL && thread != NULL) {
++  if (info != nullptr && uc != nullptr && thread != nullptr) {
+     pc = address(SIG_PC((sigcontext *)uc));
+     npc = address(SIG_NPC((sigcontext *)uc));
+ 
+@@ -458,7 +464,7 @@ bool PosixSignals::pd_hotspot_signal_handler(int sig, siginfo_t* info,
+       }
+     }
+ 
+-    if (stub != NULL) {
++    if (stub != nullptr) {
+       // save all thread context in case we need to restore it
+       thread->set_saved_exception_pc(pc);
+       thread->set_saved_exception_npc(npc);
+@@ -509,3 +515,13 @@ int os::extra_bang_size_in_bytes() {
+   // SPARC does not require the additional stack bang.
+   return 0;
+ }
++
++extern "C" {
++  int SpinPause() {
++    if (VM_Version::has_pause()) {
++      __asm__ volatile("wr %%g0, 128, %%asr27" : : : "memory");
++      return 1;
++    }
++    return 0;
++  }
++}
+diff --git a/src/hotspot/os_cpu/linux_sparc/vmStructs_linux_sparc.hpp b/src/hotspot/os_cpu/linux_sparc/vmStructs_linux_sparc.hpp
+deleted file mode 100644
+index 380b2aceb..000000000
+--- a/src/hotspot/os_cpu/linux_sparc/vmStructs_linux_sparc.hpp
++++ /dev/null
+@@ -1,63 +0,0 @@
+-/*
+- * Copyright (c) 2000, 2019, Oracle and/or its affiliates. All rights reserved.
+- * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+- *
+- * This code is free software; you can redistribute it and/or modify it
+- * under the terms of the GNU General Public License version 2 only, as
+- * published by the Free Software Foundation.
+- *
+- * This code is distributed in the hope that it will be useful, but WITHOUT
+- * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+- * FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+- * version 2 for more details (a copy is included in the LICENSE file that
+- * accompanied this code).
+- *
+- * You should have received a copy of the GNU General Public License version
+- * 2 along with this work; if not, write to the Free Software Foundation,
+- * Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301 USA.
+- *
+- * Please contact Oracle, 500 Oracle Parkway, Redwood Shores, CA 94065 USA
+- * or visit www.oracle.com if you need additional information or have any
+- * questions.
+- *
+- */
+-
+-#ifndef OS_CPU_LINUX_SPARC_VMSTRUCTS_LINUX_SPARC_HPP
+-#define OS_CPU_LINUX_SPARC_VMSTRUCTS_LINUX_SPARC_HPP
+-
+-// These are the OS and CPU-specific fields, types and integer
+-// constants required by the Serviceability Agent. This file is
+-// referenced by vmStructs.cpp.
+-
+-#define VM_STRUCTS_OS_CPU(nonstatic_field, static_field, unchecked_nonstatic_field, volatile_nonstatic_field, nonproduct_nonstatic_field, c2_nonstatic_field, unchecked_c1_static_field, unchecked_c2_static_field) \
+-                                                                                                                                     \
+-  /******************************/                                                                                                   \
+-  /* Threads (NOTE: incomplete) */                                                                                                   \
+-  /******************************/                                                                                                   \
+-                                                                                                                                     \
+-  nonstatic_field(JavaThread,                  _base_of_stack_pointer,                        intptr_t*)                             \
+-  nonstatic_field(OSThread,                    _thread_id,                                    OSThread::thread_id_t)                 \
+-  nonstatic_field(OSThread,                    _pthread_id,                                   pthread_t)
+-
+-
+-#define VM_TYPES_OS_CPU(declare_type, declare_toplevel_type, declare_oop_type, declare_integer_type, declare_unsigned_integer_type, declare_c1_toplevel_type, declare_c2_type, declare_c2_toplevel_type) \
+-                                                                          \
+-  /**********************/                                                \
+-  /* POSIX Thread IDs */                                                  \
+-  /**********************/                                                \
+-                                                                          \
+-  declare_integer_type(OSThread::thread_id_t)                             \
+-  declare_unsigned_integer_type(pthread_t)
+-
+-
+-#define VM_INT_CONSTANTS_OS_CPU(declare_constant, declare_preprocessor_constant, declare_c1_constant, declare_c2_constant, declare_c2_preprocessor_constant) \
+-                                                                        \
+-  /************************/                                            \
+-  /* JavaThread constants */                                            \
+-  /************************/                                            \
+-                                                                        \
+-  declare_constant(JavaFrameAnchor::flushed)
+-
+-#define VM_LONG_CONSTANTS_OS_CPU(declare_constant, declare_preprocessor_constant, declare_c1_constant, declare_c2_constant, declare_c2_preprocessor_constant)
+-
+-#endif // OS_CPU_LINUX_SPARC_VMSTRUCTS_LINUX_SPARC_HPP
+diff --git a/src/hotspot/os_cpu/linux_sparc/vm_version_linux_sparc.cpp b/src/hotspot/os_cpu/linux_sparc/vm_version_linux_sparc.cpp
+index 839e4cfa9..193eab559 100644
+--- a/src/hotspot/os_cpu/linux_sparc/vm_version_linux_sparc.cpp
++++ b/src/hotspot/os_cpu/linux_sparc/vm_version_linux_sparc.cpp
+@@ -23,7 +23,6 @@
+  */
+ 
+ #include "logging/log.hpp"
+-#include "precompiled.hpp"
+ #include "runtime/os.hpp"
+ #include "runtime/vm_version.hpp"
+ 
+@@ -33,22 +32,24 @@
+ 
+ class CPUinfo {
+ public:
+-  CPUinfo(const char* field) : _string(NULL) {
++  CPUinfo(const char* field) : _string(nullptr) {
+ 
+     char line[CPUINFO_LINE_SIZE];
+     FILE* fp = fopen("/proc/cpuinfo", "r");
+ 
+-    if (fp != NULL) {
+-      while (fgets(line, sizeof(line), fp) != NULL) {
++    if (fp != nullptr) {
++      while (fgets(line, sizeof(line), fp) != nullptr) {
+         assert(strlen(line) < sizeof(line) - 1,
+                "buffer too small (%d)", CPUINFO_LINE_SIZE);
+ 
+         const char* vstr = match_field(line, field);
+ 
+-        if (vstr != NULL) {
++        if (vstr != nullptr) {
+           // We have a matching line and a valid starting point to the value of
+           // the field, copy the string for keeps.
+           _string = strdup(vstr);
++          // fgets() keeps the newline, which match() must not see
++          ((char*)_string)[strcspn(_string, "\n")] = '\0';
+           break;
+         }
+       }
+@@ -60,7 +61,7 @@ class CPUinfo {
+ 
+   const char* value() const { return _string; }
+ 
+-  bool valid() const { return _string != NULL; }
++  bool valid() const { return _string != nullptr; }
+ 
+   bool match(const char* s) const {
+     return valid() ? strcmp(_string, s) == 0 : false;
+@@ -78,7 +79,7 @@ class CPUinfo {
+  * matches the field specified, according to the following regexp: "<field>"\W+:\W+
+  *
+  * If we have a matching expression, return a pointer to the first character after
+- * the matching pattern, i.e. the "value", otherwise return NULL.
++ * the matching pattern, i.e. the "value", otherwise return nullptr.
+  */
+ const char* CPUinfo::match_field(char line[CPUINFO_LINE_SIZE], const char* field) {
+   return match_alo(match_seq(match_alo(match_seq(line, field), "\t "), ":"), "\t ");
+@@ -88,28 +89,28 @@ const char* CPUinfo::match_field(char line[CPUINFO_LINE_SIZE], const char* field
+  * the text input.
+  */
+ const char* CPUinfo::match_alo(const char* text, const char* exp) {
+-  if (text == NULL) return NULL;
++  if (text == nullptr) return nullptr;
+ 
+   const char* chp;
+ 
+   for (chp = &text[0]; *chp != '\0'; chp++) {
+-    if (strchr(exp, *chp) == NULL) break;
++    if (strchr(exp, *chp) == nullptr) break;
+   }
+ 
+-  return text < chp ? chp : NULL;
++  return text < chp ? chp : nullptr;
+ }
+ 
+ /* Match an exact sequence of characters as specified by the string expression
+  * (seq) to the text input.
+  */
+ const char* CPUinfo::match_seq(const char* text, const char* seq) {
+-  if (text == NULL) return NULL;
++  if (text == nullptr) return nullptr;
+ 
+   while (*seq != '\0') {
+     if (*seq != *text++) break; else seq++;
+   }
+ 
+-  return *seq == '\0' ? text : NULL;
++  return *seq == '\0' ? text : nullptr;
+ }
+ 
+ 
+@@ -168,9 +169,10 @@ void VM_Version::platform_features() {
+     { 0x0238, false, "camellia",   ISA_camellia_msk },
+     { 0x024a, false, "ASIBlkInit", ISA_blk_init_msk },
+     { 0x0284, false, "xmontmul",   ISA_xmont_msk },         // NYI
++    { 0x02b4, false, "pause-nsec", ISA_pause_nsec_msk },    // Linux spelling
+     { 0x02e6, false, "pause_nsec", ISA_pause_nsec_msk },    // NYI
+ 
+-    { 0x0000, false, NULL, 0 }
++    { 0x0000, false, nullptr, 0 }
+   };
+ 
+   CPUinfo caps("cpucaps");      // Read "cpucaps" from /proc/cpuinfo.
+@@ -240,7 +242,7 @@ static uint64_t parse_features(FeatureEntry feature_tbl[], const char input[]) {
+ 
+   uint32_t prev = 0;
+ 
+-  for (uint k = 0; feature_tbl[k].name != NULL; k++) {
++  for (uint k = 0; feature_tbl[k].name != nullptr; k++) {
+     feature_tbl[k].seen = false;
+ 
+     assert(feature_tbl[k].hash == uhash32(feature_tbl[k].name),
+@@ -269,7 +271,7 @@ static uint64_t parse_features(FeatureEntry feature_tbl[], const char input[]) {
+   do {
+     char ch = input[i];
+ 
+-    if (isalnum(ch) || ch == '_') {
++    if (isalnum(ch) || ch == '_' || ch == '-') {
+       hv += (ch - 32u);
+     }
+     else if (isspace(ch) || ch == ',' || ch == '\0') { // end-of-token
+@@ -289,7 +291,7 @@ static uint64_t parse_features(FeatureEntry feature_tbl[], const char input[]) {
+ 
+   uint64_t mask = 0;
+ 
+-  for (uint k = 0; feature_tbl[k].name != NULL; k++) {
++  for (uint k = 0; feature_tbl[k].name != nullptr; k++) {
+     mask |= feature_tbl[k].seen ? feature_tbl[k].mask : 0;
+   }
+ 
+@@ -315,7 +317,7 @@ static void update_table(FeatureEntry feature_tbl[], uint32_t hv, const char* ch
+   // is expected to stay small), we use a simple linear search (iff the table
+   // grows large, we may consider to adopt a binary ditto, or a perfect hash).
+ 
+-  for (uint k = 0; feature_tbl[k].name != NULL; k++) {
++  for (uint k = 0; feature_tbl[k].name != nullptr; k++) {
+     uint32_t hash = feature_tbl[k].hash;
+ 
+     if (hash < hv) continue;

@@ -1,0 +1,61 @@
+diff --git a/src/hotspot/os_cpu/linux_sparc/os_linux_sparc.cpp b/src/hotspot/os_cpu/linux_sparc/os_linux_sparc.cpp
+index bc0bc8dae..80d66df75 100644
+--- a/src/hotspot/os_cpu/linux_sparc/os_linux_sparc.cpp
++++ b/src/hotspot/os_cpu/linux_sparc/os_linux_sparc.cpp
+@@ -29,7 +29,6 @@
+ #include "classfile/systemDictionary.hpp"
+ #include "classfile/vmSymbols.hpp"
+ #include "code/codeCache.hpp"
+-#include "code/icBuffer.hpp"
+ #include "code/vtableStubs.hpp"
+ #include "interpreter/interpreter.hpp"
+ #include "memory/allocation.inline.hpp"
+@@ -312,11 +311,11 @@ inline static bool checkByteBuffer(address pc, address npc, JavaThread * thread,
+   // here if the underlying file has been truncated.
+   // Do not crash the VM in such a case.
+   CodeBlob* cb = CodeCache::find_blob(pc);
+-  CompiledMethod* nm = cb->as_compiled_method_or_null();
+-  bool is_unsafe_arraycopy = (thread->doing_unsafe_access() && UnsafeCopyMemory::contains_pc(pc));
++  nmethod* nm = cb->as_nmethod_or_null();
++  bool is_unsafe_arraycopy = (thread->doing_unsafe_access() && UnsafeMemoryAccess::contains_pc(pc));
+   if ((nm != NULL && nm->has_unsafe_access()) || is_unsafe_arraycopy) {
+     if (is_unsafe_arraycopy) {
+-      npc = UnsafeCopyMemory::page_error_continue_pc(pc);
++      npc = UnsafeMemoryAccess::page_error_continue_pc(pc);
+     }
+     *stub = SharedRuntime::handle_unsafe_access(thread, npc);
+     return true;
+@@ -385,14 +384,7 @@ inline static bool checkZombie(sigcontext* uc, address* pc, address* stub) {
+ }
+ 
+ inline static bool checkICMiss(sigcontext* uc, address* pc, address* stub) {
+-#ifdef COMPILER2
+   if (nativeInstruction_at(*pc)->is_ic_miss_trap()) {
+-#ifdef ASSERT
+-  #if COMPILER1_AND_COMPILER2
+-    CodeBlob* cb = CodeCache::find_blob(*pc);
+-    assert(cb->is_compiled_by_c2(), "Wrong compiler");
+-  #endif // COMPILER1_AND_COMPILER2
+-#endif // ASSERT
+     // Inline cache missed and user trap "Tne G0+ST_RESERVED_FOR_USER_0+2" taken.
+     *stub = SharedRuntime::get_ic_miss_stub();
+     // At the stub it needs to look like a call from the caller of this
+@@ -400,7 +392,6 @@ inline static bool checkICMiss(sigcontext* uc, address* pc, address* stub) {
+     *pc = (address)SIG_REGS(uc).u_regs[CON_O7];
+     return true;
+   }
+-#endif  // COMPILER2
+   return false;
+ }
+ 
+@@ -434,8 +425,8 @@ bool PosixSignals::pd_hotspot_signal_handler(int sig, siginfo_t* info,
+         (thread->thread_state() == _thread_in_vm ||
+          thread->thread_state() == _thread_in_native) &&
+         thread->doing_unsafe_access()) {
+-      if (UnsafeCopyMemory::contains_pc(pc)) {
+-        npc = UnsafeCopyMemory::page_error_continue_pc(pc);
++      if (UnsafeMemoryAccess::contains_pc(pc)) {
++        npc = UnsafeMemoryAccess::page_error_continue_pc(pc);
+       }
+       stub = SharedRuntime::handle_unsafe_access(thread, npc);
+     }

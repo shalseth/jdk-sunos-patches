@@ -1,0 +1,1277 @@
+diff --git a/src/hotspot/cpu/sparc/compressedKlass_sparc.cpp b/src/hotspot/cpu/sparc/compressedKlass_sparc.cpp
+new file mode 100644
+index 000000000..51012eef8
+--- /dev/null
++++ b/src/hotspot/cpu/sparc/compressedKlass_sparc.cpp
+@@ -0,0 +1,48 @@
++/*
++ * Copyright (c) 2023, Red Hat, Inc. All rights reserved.
++ * Copyright (c) 2023, Oracle and/or its affiliates. All rights reserved.
++ * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
++ *
++ * This code is free software; you can redistribute it and/or modify it
++ * under the terms of the GNU General Public License version 2 only, as
++ * published by the Free Software Foundation.
++ *
++ * This code is distributed in the hope that it will be useful, but WITHOUT
++ * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
++ * FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
++ * version 2 for more details (a copy is included in the LICENSE file that
++ * accompanied this code).
++ *
++ * You should have received a copy of the GNU General Public License version
++ * 2 along with this work; if not, write to the Free Software Foundation,
++ * Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301 USA.
++ *
++ * Please contact Oracle, 500 Oracle Parkway, Redwood Shores, CA 94065 USA
++ * or visit www.oracle.com if you need additional information or have any
++ * questions.
++ *
++ */
++
++#include "precompiled.hpp"
++#include "oops/compressedKlass.hpp"
++#include "utilities/globalDefinitions.hpp"
++
++char* CompressedKlassPointers::reserve_address_space_for_compressed_classes(size_t size, bool aslr, bool optimize_for_zero_base) {
++
++  char* result = nullptr;
++
++  // Optimize for base=0 shift=0; failing that, for base=0 shift>0
++  if (optimize_for_zero_base) {
++    result = reserve_address_space_for_unscaled_encoding(size, aslr);
++    if (result == nullptr) {
++      result = reserve_address_space_for_zerobased_encoding(size, aslr);
++    }
++  }
++
++  // Optimize for a single 16-bit move: a base that has only bits set in its third quadrant [32..48).
++  if (result == nullptr) {
++    result = reserve_address_space_for_16bit_move(size, aslr);
++  }
++
++  return result;
++}
+diff --git a/src/hotspot/cpu/sparc/continuationEntry_sparc.inline.hpp b/src/hotspot/cpu/sparc/continuationEntry_sparc.inline.hpp
+index 3aa304ac6..88e24cb58 100644
+--- a/src/hotspot/cpu/sparc/continuationEntry_sparc.inline.hpp
++++ b/src/hotspot/cpu/sparc/continuationEntry_sparc.inline.hpp
+@@ -25,6 +25,7 @@
+ #ifndef CPU_SPARC_CONTINUATIONENTRY_SPARC_INLINE_HPP
+ #define CPU_SPARC_CONTINUATIONENTRY_SPARC_INLINE_HPP
+ 
++
+ #include "runtime/continuationEntry.hpp"
+ 
+ // TODO: Implement
+diff --git a/src/hotspot/cpu/sparc/downcallLinker_sparc.cpp b/src/hotspot/cpu/sparc/downcallLinker_sparc.cpp
+index baee7d7a0..eb15424eb 100644
+--- a/src/hotspot/cpu/sparc/downcallLinker_sparc.cpp
++++ b/src/hotspot/cpu/sparc/downcallLinker_sparc.cpp
+@@ -38,3 +38,8 @@ RuntimeStub* DowncallLinker::make_downcall_stub(BasicType* signature,
+   Unimplemented();
+   return nullptr;
+ }
++
++void DowncallLinker::StubGenerator::pd_add_offset_to_oop(VMStorage reg_oop, VMStorage reg_offset,
++                                                         VMStorage tmp1, VMStorage tmp2) const {
++  Unimplemented();
++}
+diff --git a/src/hotspot/cpu/sparc/foreignGlobals_sparc.cpp b/src/hotspot/cpu/sparc/foreignGlobals_sparc.cpp
+index d3a318536..5f5a4eb32 100644
+--- a/src/hotspot/cpu/sparc/foreignGlobals_sparc.cpp
++++ b/src/hotspot/cpu/sparc/foreignGlobals_sparc.cpp
+@@ -51,6 +51,6 @@ void RegSpiller::pd_load_reg(MacroAssembler* masm, int offset, VMStorage reg) {
+   Unimplemented();
+ }
+ 
+-void ArgumentShuffle::pd_generate(MacroAssembler* masm, VMStorage tmp, int in_stk_bias, int out_stk_bias, const StubLocations& locs) const {
++void ArgumentShuffle::pd_generate(MacroAssembler* masm, VMStorage tmp, int in_stk_bias, int out_stk_bias) const {
+   Unimplemented();
+ }
+diff --git a/src/hotspot/cpu/sparc/globalDefinitions_sparc.hpp b/src/hotspot/cpu/sparc/globalDefinitions_sparc.hpp
+index 914fca1d7..302078e64 100644
+--- a/src/hotspot/cpu/sparc/globalDefinitions_sparc.hpp
++++ b/src/hotspot/cpu/sparc/globalDefinitions_sparc.hpp
+@@ -27,6 +27,9 @@
+ 
+ const size_t pd_segfault_address = 1024;
+ 
++// Number of stack entries for longs
++const int WordsPerLong = 2;
++
+ // Size of Sparc Instructions
+ const int BytesPerInstWord = 4;
+ 
+diff --git a/src/hotspot/cpu/sparc/interp_masm_sparc.cpp b/src/hotspot/cpu/sparc/interp_masm_sparc.cpp
+index 4da04abc6..f4c3a9b43 100644
+--- a/src/hotspot/cpu/sparc/interp_masm_sparc.cpp
++++ b/src/hotspot/cpu/sparc/interp_masm_sparc.cpp
+@@ -33,7 +33,9 @@
+ #include "oops/methodData.hpp"
+ #include "oops/method.hpp"
+ #include "oops/methodCounters.hpp"
++#include "oops/resolvedFieldEntry.hpp"
+ #include "oops/resolvedIndyEntry.hpp"
++#include "oops/resolvedMethodEntry.hpp"
+ #include "prims/jvmtiExport.hpp"
+ #include "prims/jvmtiThreadState.hpp"
+ #include "runtime/basicLock.hpp"
+@@ -695,54 +697,30 @@ void InterpreterMacroAssembler::load_resolved_indy_entry(Register cache, Registe
+   add(cache, index, cache);
+ }
+ 
+-void InterpreterMacroAssembler::get_cache_and_index_at_bcp(Register cache, Register tmp,
+-                                                           int bcp_offset, size_t index_size) {
+-  assert(bcp_offset > 0, "bcp is still pointing to start of bytecode");
+-  assert_different_registers(cache, tmp);
+-  assert_not_delayed();
+-  get_cache_index_at_bcp(cache, tmp, bcp_offset, index_size);
+-  // convert from field index to ConstantPoolCacheEntry index and from
+-  // word index to byte offset
+-  sll(tmp, exact_log2(in_words(ConstantPoolCacheEntry::size()) * BytesPerWord), tmp);
+-  add(LcpoolCache, tmp, cache);
+-}
+-
+-
+-void InterpreterMacroAssembler::get_cache_and_index_and_bytecode_at_bcp(Register cache,
+-                                                                        Register temp,
+-                                                                        Register bytecode,
+-                                                                        int byte_no,
+-                                                                        int bcp_offset,
+-                                                                        size_t index_size) {
+-  get_cache_and_index_at_bcp(cache, temp, bcp_offset, index_size);
+-  ld_ptr(cache, ConstantPoolCache::base_offset() + ConstantPoolCacheEntry::indices_offset(), bytecode);
+-  const int shift_count = (1 + byte_no) * BitsPerByte;
+-  assert((byte_no == TemplateTable::f1_byte && shift_count == ConstantPoolCacheEntry::bytecode_1_shift) ||
+-         (byte_no == TemplateTable::f2_byte && shift_count == ConstantPoolCacheEntry::bytecode_2_shift),
+-         "correct shift count");
+-  srl(bytecode, shift_count, bytecode);
+-  assert(ConstantPoolCacheEntry::bytecode_1_mask == ConstantPoolCacheEntry::bytecode_2_mask, "common mask");
+-  and3(bytecode, ConstantPoolCacheEntry::bytecode_1_mask, bytecode);
+-}
+-
+-
+-void InterpreterMacroAssembler::get_cache_entry_pointer_at_bcp(Register cache, Register tmp,
+-                                                               int bcp_offset, size_t index_size) {
+-  assert(bcp_offset > 0, "bcp is still pointing to start of bytecode");
+-  assert_different_registers(cache, tmp);
+-  assert_not_delayed();
+-  if (index_size == sizeof(u2)) {
+-    get_2_byte_integer_at_bcp(bcp_offset, cache, tmp, Unsigned);
++void InterpreterMacroAssembler::load_field_entry(Register cache, Register index, int bcp_offset) {
++  assert_different_registers(cache, index);
++  get_cache_index_at_bcp(cache, index, bcp_offset, sizeof(u2));
++  ld_ptr(LcpoolCache, in_bytes(ConstantPoolCache::field_entries_offset()), cache);
++  if (is_power_of_2(sizeof(ResolvedFieldEntry))) {
++    sll(index, log2i_exact(sizeof(ResolvedFieldEntry)), index);
+   } else {
+-    ShouldNotReachHere();  // other sizes not supported here
++    mulx(index, sizeof(ResolvedFieldEntry), index);
+   }
+-              // convert from field index to ConstantPoolCacheEntry index
+-              // and from word index to byte offset
+-  sll(tmp, exact_log2(in_words(ConstantPoolCacheEntry::size()) * BytesPerWord), tmp);
+-              // skip past the header
+-  add(tmp, in_bytes(ConstantPoolCache::base_offset()), tmp);
+-              // construct pointer to cache entry
+-  add(LcpoolCache, tmp, cache);
++  add(cache, Array<ResolvedFieldEntry>::base_offset_in_bytes(), cache);
++  add(cache, index, cache);
++}
++
++void InterpreterMacroAssembler::load_method_entry(Register cache, Register index, int bcp_offset) {
++  assert_different_registers(cache, index);
++  get_cache_index_at_bcp(cache, index, bcp_offset, sizeof(u2));
++  ld_ptr(LcpoolCache, in_bytes(ConstantPoolCache::method_entries_offset()), cache);
++  if (is_power_of_2(sizeof(ResolvedMethodEntry))) {
++    sll(index, log2i_exact(sizeof(ResolvedMethodEntry)), index);
++  } else {
++    mulx(index, sizeof(ResolvedMethodEntry), index);
++  }
++  add(cache, Array<ResolvedMethodEntry>::base_offset_in_bytes(), cache);
++  add(cache, index, cache);
+ }
+ 
+ 
+diff --git a/src/hotspot/cpu/sparc/interp_masm_sparc.hpp b/src/hotspot/cpu/sparc/interp_masm_sparc.hpp
+index 72c6efeb7..75827b63b 100644
+--- a/src/hotspot/cpu/sparc/interp_masm_sparc.hpp
++++ b/src/hotspot/cpu/sparc/interp_masm_sparc.hpp
+@@ -175,10 +175,8 @@ class InterpreterMacroAssembler: public MacroAssembler {
+                                   Register   Rdst,
+                                   setCCOrNot should_set_CC = dont_set_CC );
+ 
+-  // Note: "get_cache_and_index" really means "get the index, use it to get the cache entry, and throw away the index".
+-  void get_cache_and_index_at_bcp(Register cache, Register tmp, int bcp_offset, size_t index_size = sizeof(u2));
+-  void get_cache_and_index_and_bytecode_at_bcp(Register cache, Register temp, Register bytecode, int byte_no, int bcp_offset, size_t index_size = sizeof(u2));
+-  void get_cache_entry_pointer_at_bcp(Register cache, Register tmp, int bcp_offset, size_t index_size = sizeof(u2));
++  void load_field_entry(Register cache, Register index, int bcp_offset = 1);
++  void load_method_entry(Register cache, Register index, int bcp_offset = 1);
+   // Note: This one does not fetch the cache.  The first argument is a temp which may be killed.
+   void get_cache_index_at_bcp(Register temp, Register index, int bcp_offset, size_t index_size = sizeof(u2));
+ 
+diff --git a/src/hotspot/cpu/sparc/sharedRuntime_sparc.cpp b/src/hotspot/cpu/sparc/sharedRuntime_sparc.cpp
+index 1f30589d6..667f7d16e 100644
+--- a/src/hotspot/cpu/sparc/sharedRuntime_sparc.cpp
++++ b/src/hotspot/cpu/sparc/sharedRuntime_sparc.cpp
+@@ -963,9 +963,7 @@ static VMReg int_stk_helper( int i ) {
+ 
+ int SharedRuntime::c_calling_convention(const BasicType *sig_bt,
+                                          VMRegPair *regs,
+-                                         VMRegPair *regs2,
+                                          int total_args_passed) {
+-    assert(regs2 == NULL, "not needed on sparc");
+ 
+     // Return the number of VMReg stack_slots needed for the args.
+     // This value does not include an abi space (like register window
+@@ -1705,7 +1703,7 @@ nmethod* SharedRuntime::generate_native_wrapper(MacroAssembler* masm,
+   // the 1st six register arguments). It's weird see int_stk_helper.
+   //
+   int out_arg_slots;
+-  out_arg_slots = c_calling_convention(out_sig_bt, out_regs, NULL, total_c_args);
++  out_arg_slots = c_calling_convention(out_sig_bt, out_regs, total_c_args);
+ 
+   // Compute framesize for the wrapper.  We need to handlize all oops in
+   // registers. We must create space for them here that is disjoint from
+diff --git a/src/hotspot/cpu/sparc/smallRegisterMap_sparc.inline.hpp b/src/hotspot/cpu/sparc/smallRegisterMap_sparc.inline.hpp
+index ae8b9dd31..cbb4b9b0e 100644
+--- a/src/hotspot/cpu/sparc/smallRegisterMap_sparc.inline.hpp
++++ b/src/hotspot/cpu/sparc/smallRegisterMap_sparc.inline.hpp
+@@ -30,15 +30,8 @@
+ 
+ // Java frames don't have callee saved registers (except for rfp), so we can use a smaller RegisterMap
+ class SmallRegisterMap {
+-  constexpr SmallRegisterMap() = default;
+-  ~SmallRegisterMap() = default;
+-  NONCOPYABLE(SmallRegisterMap);
+-
+ public:
+-  static const SmallRegisterMap* instance() {
+-    static constexpr SmallRegisterMap the_instance{};
+-    return &the_instance;
+-  }
++  static constexpr SmallRegisterMap* instance = nullptr;
+ private:
+   static void assert_is_rfp(VMReg r) NOT_DEBUG_RETURN
+                                      DEBUG_ONLY({ Unimplemented(); })
+@@ -53,6 +46,12 @@ class SmallRegisterMap {
+     return map;
+   }
+ 
++  SmallRegisterMap() {}
++
++  SmallRegisterMap(const RegisterMap* map) {
++    Unimplemented();
++  }
++
+   inline address location(VMReg reg, intptr_t* sp) const {
+     Unimplemented();
+     return nullptr;
+diff --git a/src/hotspot/cpu/sparc/sparc.ad b/src/hotspot/cpu/sparc/sparc.ad
+index 49837613e..b57ee301b 100644
+--- a/src/hotspot/cpu/sparc/sparc.ad
++++ b/src/hotspot/cpu/sparc/sparc.ad
+@@ -1587,7 +1587,7 @@ static FloatRegister reg_to_DoubleFloatRegister_object(int register_encoding) {
+   return as_DoubleFloatRegister(register_encoding);
+ }
+ 
+-const bool Matcher::match_rule_supported(int opcode) {
++bool Matcher::match_rule_supported(int opcode) {
+   if (!has_match_rule(opcode))
+     return false;
+ 
+@@ -1610,7 +1610,7 @@ const bool Matcher::match_rule_supported(int opcode) {
+   return true;  // Per default match rules are supported.
+ }
+ 
+-const bool Matcher::match_rule_supported_vector(int opcode, int vlen, BasicType bt) {
++bool Matcher::match_rule_supported_vector(int opcode, int vlen, BasicType bt) {
+ 
+   // TODO
+   // identify extra cases that we might want to provide match rules for
+@@ -1621,19 +1621,19 @@ const bool Matcher::match_rule_supported_vector(int opcode, int vlen, BasicType
+   return ret_value;  // Per default match rules are supported.
+ }
+ 
+-const int Matcher::superword_max_vector_size(const BasicType bt) {
++int Matcher::superword_max_vector_size(const BasicType bt) {
+   return Matcher::max_vector_size(bt);
+ }
+ 
+-const bool Matcher::match_rule_supported_superword(int opcode, int vlen, BasicType bt) {
++bool Matcher::match_rule_supported_superword(int opcode, int vlen, BasicType bt) {
+   return match_rule_supported_vector(opcode, vlen, bt);
+ }
+ 
+-const bool Matcher::vector_needs_partial_operations(Node* node, const TypeVect* vt) {
++bool Matcher::vector_needs_partial_operations(Node* node, const TypeVect* vt) {
+   return false;
+ }
+ 
+-const bool Matcher::match_rule_supported_vector_masked(int opcode, int vlen, BasicType bt) {
++bool Matcher::match_rule_supported_vector_masked(int opcode, int vlen, BasicType bt) {
+   return false;
+ }
+ 
+@@ -1646,7 +1646,7 @@ const TypeVectMask* Matcher::predicate_reg_type(const Type* elemTy, int length)
+ }
+ 
+ // Vector calling convention not yet implemented.
+-const bool Matcher::supports_vector_calling_convention(void) {
++bool Matcher::supports_vector_calling_convention(void) {
+   return false;
+ }
+ 
+@@ -1660,27 +1660,27 @@ address last_rethrow = NULL;  // debugging aid for Rethrow encoding
+ #endif
+ 
+ // Vector width in bytes
+-const int Matcher::vector_width_in_bytes(BasicType bt) {
++int Matcher::vector_width_in_bytes(BasicType bt) {
+   assert(MaxVectorSize == 8, "");
+   return 8;
+ }
+ 
+-const int Matcher::scalable_vector_reg_size(const BasicType bt) {
++int Matcher::scalable_vector_reg_size(const BasicType bt) {
+   return -1;
+ }
+ // Vector ideal reg
+-const uint Matcher::vector_ideal_reg(int size) {
++uint Matcher::vector_ideal_reg(int size) {
+   assert(MaxVectorSize == 8, "");
+   return Op_RegD;
+ }
+ 
+ // Limits on vector size (number of elements) loaded into vector.
+-const int Matcher::max_vector_size(const BasicType bt) {
++int Matcher::max_vector_size(const BasicType bt) {
+   assert(is_java_primitive(bt), "only primitive type vectors");
+   return vector_width_in_bytes(bt)/type2aelembytes(bt);
+ }
+ 
+-const int Matcher::min_vector_size(const BasicType bt) {
++int Matcher::min_vector_size(const BasicType bt) {
+   return max_vector_size(bt); // Same as max.
+ }
+ 
+@@ -2861,7 +2861,7 @@ frame %{
+   // C.
+   c_calling_convention %{
+     // This is obviously always outgoing
+-    (void) SharedRuntime::c_calling_convention(sig_bt, regs, /*regs2=*/NULL, length);
++    (void) SharedRuntime::c_calling_convention(sig_bt, regs, length);
+   %}
+ 
+   // Location of native (C/C++) and interpreter return values.  This is specified to
+@@ -10392,9 +10392,9 @@ instruct storeV8(memory mem, regD src) %{
+ %}
+ 
+ // Store Zero into vector in memory
+-instruct storeV8B_zero(memory mem, immI0 zero) %{
++instruct storeV8_zero(memory mem, immI0 zero) %{
+   predicate(n->as_StoreVector()->memory_size() == 8);
+-  match(Set mem (StoreVector mem (ReplicateB zero)));
++  match(Set mem (StoreVector mem (Replicate zero)));
+   ins_cost(MEMORY_REF_COST);
+   size(4);
+   format %{ "STX    $zero,$mem\t! store zero vector (8 bytes)" %}
+@@ -10404,33 +10404,9 @@ instruct storeV8B_zero(memory mem, immI0 zero) %{
+   ins_pipe(fstoreD_mem_zero);
+ %}
+ 
+-instruct storeV4S_zero(memory mem, immI0 zero) %{
+-  predicate(n->as_StoreVector()->memory_size() == 8);
+-  match(Set mem (StoreVector mem (ReplicateS zero)));
+-  ins_cost(MEMORY_REF_COST);
+-  size(4);
+-  format %{ "STX    $zero,$mem\t! store zero vector (4 shorts)" %}
+-  ins_encode %{
+-    __ stx(G0, $mem$$Address);
+-  %}
+-  ins_pipe(fstoreD_mem_zero);
+-%}
+-
+-instruct storeV2I_zero(memory mem, immI0 zero) %{
+-  predicate(n->as_StoreVector()->memory_size() == 8);
+-  match(Set mem (StoreVector mem (ReplicateI zero)));
+-  ins_cost(MEMORY_REF_COST);
+-  size(4);
+-  format %{ "STX    $zero,$mem\t! store zero vector (2 ints)" %}
+-  ins_encode %{
+-    __ stx(G0, $mem$$Address);
+-  %}
+-  ins_pipe(fstoreD_mem_zero);
+-%}
+-
+ instruct storeV2F_zero(memory mem, immF0 zero) %{
+   predicate(n->as_StoreVector()->memory_size() == 8);
+-  match(Set mem (StoreVector mem (ReplicateF zero)));
++  match(Set mem (StoreVector mem (Replicate zero)));
+   ins_cost(MEMORY_REF_COST);
+   size(4);
+   format %{ "STX    $zero,$mem\t! store zero vector (2 floats)" %}
+@@ -10442,8 +10418,8 @@ instruct storeV2F_zero(memory mem, immF0 zero) %{
+ 
+ // Replicate scalar to packed byte values into Double register
+ instruct Repl8B_reg(regD dst, iRegI src, iRegL tmp, o7RegL tmp2) %{
+-  predicate(n->as_Vector()->length() == 8 && UseVIS >= 3);
+-  match(Set dst (ReplicateB src));
++  predicate(n->as_Vector()->length() == 8 && UseVIS >= 3 && Matcher::vector_element_basic_type(n) == T_BYTE);
++  match(Set dst (Replicate src));
+   effect(DEF dst, USE src, TEMP tmp, KILL tmp2);
+   format %{ "SLLX  $src,56,$tmp\n\t"
+             "SRLX  $tmp, 8,$tmp2\n\t"
+@@ -10471,8 +10447,8 @@ instruct Repl8B_reg(regD dst, iRegI src, iRegL tmp, o7RegL tmp2) %{
+ 
+ // Replicate scalar to packed byte values into Double stack
+ instruct Repl8B_stk(stackSlotD dst, iRegI src, iRegL tmp, o7RegL tmp2) %{
+-  predicate(n->as_Vector()->length() == 8 && UseVIS < 3);
+-  match(Set dst (ReplicateB src));
++  predicate(n->as_Vector()->length() == 8 && UseVIS < 3 && Matcher::vector_element_basic_type(n) == T_BYTE);
++  match(Set dst (Replicate src));
+   effect(DEF dst, USE src, TEMP tmp, KILL tmp2);
+   format %{ "SLLX  $src,56,$tmp\n\t"
+             "SRLX  $tmp, 8,$tmp2\n\t"
+@@ -10501,8 +10477,8 @@ instruct Repl8B_stk(stackSlotD dst, iRegI src, iRegL tmp, o7RegL tmp2) %{
+ 
+ // Replicate scalar constant to packed byte values in Double register
+ instruct Repl8B_immI(regD dst, immI13 con, o7RegI tmp) %{
+-  predicate(n->as_Vector()->length() == 8);
+-  match(Set dst (ReplicateB con));
++  predicate(n->as_Vector()->length() == 8 && Matcher::vector_element_basic_type(n) == T_BYTE);
++  match(Set dst (Replicate con));
+   effect(KILL tmp);
+   format %{ "LDDF   [$constanttablebase + $constantoffset],$dst\t! load from constant table: Repl8B($con)" %}
+   ins_encode %{
+@@ -10516,8 +10492,8 @@ instruct Repl8B_immI(regD dst, immI13 con, o7RegI tmp) %{
+ 
+ // Replicate scalar to packed char/short values into Double register
+ instruct Repl4S_reg(regD dst, iRegI src, iRegL tmp, o7RegL tmp2) %{
+-  predicate(n->as_Vector()->length() == 4 && UseVIS >= 3);
+-  match(Set dst (ReplicateS src));
++  predicate(n->as_Vector()->length() == 4 && UseVIS >= 3 && Matcher::vector_element_basic_type(n) == T_SHORT);
++  match(Set dst (Replicate src));
+   effect(DEF dst, USE src, TEMP tmp, KILL tmp2);
+   format %{ "SLLX  $src,48,$tmp\n\t"
+             "SRLX  $tmp,16,$tmp2\n\t"
+@@ -10541,8 +10517,8 @@ instruct Repl4S_reg(regD dst, iRegI src, iRegL tmp, o7RegL tmp2) %{
+ 
+ // Replicate scalar to packed char/short values into Double stack
+ instruct Repl4S_stk(stackSlotD dst, iRegI src, iRegL tmp, o7RegL tmp2) %{
+-  predicate(n->as_Vector()->length() == 4 && UseVIS < 3);
+-  match(Set dst (ReplicateS src));
++  predicate(n->as_Vector()->length() == 4 && UseVIS < 3 && Matcher::vector_element_basic_type(n) == T_SHORT);
++  match(Set dst (Replicate src));
+   effect(DEF dst, USE src, TEMP tmp, KILL tmp2);
+   format %{ "SLLX  $src,48,$tmp\n\t"
+             "SRLX  $tmp,16,$tmp2\n\t"
+@@ -10567,8 +10543,8 @@ instruct Repl4S_stk(stackSlotD dst, iRegI src, iRegL tmp, o7RegL tmp2) %{
+ 
+ // Replicate scalar constant to packed char/short values in Double register
+ instruct Repl4S_immI(regD dst, immI con, o7RegI tmp) %{
+-  predicate(n->as_Vector()->length() == 4);
+-  match(Set dst (ReplicateS con));
++  predicate(n->as_Vector()->length() == 4 && Matcher::vector_element_basic_type(n) == T_SHORT);
++  match(Set dst (Replicate con));
+   effect(KILL tmp);
+   format %{ "LDDF   [$constanttablebase + $constantoffset],$dst\t! load from constant table: Repl4S($con)" %}
+   ins_encode %{
+@@ -10582,8 +10558,8 @@ instruct Repl4S_immI(regD dst, immI con, o7RegI tmp) %{
+ 
+ // Replicate scalar to packed int values into Double register
+ instruct Repl2I_reg(regD dst, iRegI src, iRegL tmp, o7RegL tmp2) %{
+-  predicate(n->as_Vector()->length() == 2 && UseVIS >= 3);
+-  match(Set dst (ReplicateI src));
++  predicate(n->as_Vector()->length() == 2 && UseVIS >= 3 && Matcher::vector_element_basic_type(n) == T_INT);
++  match(Set dst (Replicate src));
+   effect(DEF dst, USE src, TEMP tmp, KILL tmp2);
+   format %{ "SLLX  $src,32,$tmp\n\t"
+             "SRLX  $tmp,32,$tmp2\n\t"
+@@ -10603,8 +10579,8 @@ instruct Repl2I_reg(regD dst, iRegI src, iRegL tmp, o7RegL tmp2) %{
+ 
+ // Replicate scalar to packed int values into Double stack
+ instruct Repl2I_stk(stackSlotD dst, iRegI src, iRegL tmp, o7RegL tmp2) %{
+-  predicate(n->as_Vector()->length() == 2 && UseVIS < 3);
+-  match(Set dst (ReplicateI src));
++  predicate(n->as_Vector()->length() == 2 && UseVIS < 3 && Matcher::vector_element_basic_type(n) == T_INT);
++  match(Set dst (Replicate src));
+   effect(DEF dst, USE src, TEMP tmp, KILL tmp2);
+   format %{ "SLLX  $src,32,$tmp\n\t"
+             "SRLX  $tmp,32,$tmp2\n\t"
+@@ -10625,8 +10601,8 @@ instruct Repl2I_stk(stackSlotD dst, iRegI src, iRegL tmp, o7RegL tmp2) %{
+ 
+ // Replicate scalar zero constant to packed int values in Double register
+ instruct Repl2I_immI(regD dst, immI con, o7RegI tmp) %{
+-  predicate(n->as_Vector()->length() == 2);
+-  match(Set dst (ReplicateI con));
++  predicate(n->as_Vector()->length() == 2 && Matcher::vector_element_basic_type(n) == T_INT);
++  match(Set dst (Replicate con));
+   effect(KILL tmp);
+   format %{ "LDDF   [$constanttablebase + $constantoffset],$dst\t! load from constant table: Repl2I($con)" %}
+   ins_encode %{
+@@ -10640,8 +10616,8 @@ instruct Repl2I_immI(regD dst, immI con, o7RegI tmp) %{
+ 
+ // Replicate scalar to packed float values into Double stack
+ instruct Repl2F_stk(stackSlotD dst, regF src) %{
+-  predicate(n->as_Vector()->length() == 2);
+-  match(Set dst (ReplicateF src));
++  predicate(n->as_Vector()->length() == 2 && Matcher::vector_element_basic_type(n) == T_FLOAT);
++  match(Set dst (Replicate src));
+   ins_cost(MEMORY_REF_COST*2);
+   format %{ "STF    $src,$dst.hi\t! packed2F\n\t"
+             "STF    $src,$dst.lo" %}
+@@ -10652,8 +10628,8 @@ instruct Repl2F_stk(stackSlotD dst, regF src) %{
+ 
+ // Replicate scalar zero constant to packed float values in Double register
+ instruct Repl2F_immF(regD dst, immF con, o7RegI tmp) %{
+-  predicate(n->as_Vector()->length() == 2);
+-  match(Set dst (ReplicateF con));
++  predicate(n->as_Vector()->length() == 2 && Matcher::vector_element_basic_type(n) == T_FLOAT);
++  match(Set dst (Replicate con));
+   effect(KILL tmp);
+   format %{ "LDDF   [$constanttablebase + $constantoffset],$dst\t! load from constant table: Repl2F($con)" %}
+   ins_encode %{
+diff --git a/src/hotspot/cpu/sparc/templateInterpreterGenerator_sparc.cpp b/src/hotspot/cpu/sparc/templateInterpreterGenerator_sparc.cpp
+index fbd901218..2cf08f042 100644
+--- a/src/hotspot/cpu/sparc/templateInterpreterGenerator_sparc.cpp
++++ b/src/hotspot/cpu/sparc/templateInterpreterGenerator_sparc.cpp
+@@ -32,10 +32,12 @@
+ #include "interpreter/templateInterpreterGenerator.hpp"
+ #include "interpreter/templateTable.hpp"
+ #include "oops/arrayOop.hpp"
++#include "oops/methodCounters.hpp"
+ #include "oops/methodData.hpp"
+ #include "oops/method.hpp"
+ #include "oops/oop.inline.hpp"
+ #include "oops/resolvedIndyEntry.hpp"
++#include "oops/resolvedMethodEntry.hpp"
+ #include "prims/jvmtiExport.hpp"
+ #include "prims/jvmtiThreadState.hpp"
+ #include "runtime/arguments.hpp"
+@@ -302,10 +304,8 @@ address TemplateInterpreterGenerator::generate_return_entry_for(TosState state,
+     __ load_resolved_indy_entry(cache, index);
+     __ lduh(cache, in_bytes(ResolvedIndyEntry::num_parameters_offset()), parameter_size);
+   } else {
+-    __ get_cache_and_index_at_bcp(cache, index, 1, index_size);
+-    const Register flags = cache;
+-    __ ld_ptr(cache, ConstantPoolCache::base_offset() + ConstantPoolCacheEntry::flags_offset(), flags);
+-    __ and3(flags, ConstantPoolCacheEntry::parameter_size_mask, parameter_size);  // argument size in words
++    __ load_method_entry(cache, index);
++    __ lduh(cache, in_bytes(ResolvedMethodEntry::num_parameters_offset()), parameter_size);
+   }
+   __ sll(parameter_size, Interpreter::logStackElementSize, parameter_size);     // each argument size in bytes
+   __ add(Lesp, parameter_size, Lesp);                                           // pop arguments
+diff --git a/src/hotspot/cpu/sparc/templateTable_sparc.cpp b/src/hotspot/cpu/sparc/templateTable_sparc.cpp
+index 924951fb6..fd88372f2 100644
+--- a/src/hotspot/cpu/sparc/templateTable_sparc.cpp
++++ b/src/hotspot/cpu/sparc/templateTable_sparc.cpp
+@@ -31,8 +31,11 @@
+ #include "interpreter/interp_masm.hpp"
+ #include "interpreter/templateTable.hpp"
+ #include "memory/universe.hpp"
++#include "oops/methodCounters.hpp"
+ #include "oops/methodData.hpp"
++#include "oops/resolvedFieldEntry.hpp"
+ #include "oops/resolvedIndyEntry.hpp"
++#include "oops/resolvedMethodEntry.hpp"
+ #include "oops/objArrayKlass.hpp"
+ #include "oops/oop.inline.hpp"
+ #include "prims/jvmtiExport.hpp"
+@@ -135,7 +138,12 @@ void TemplateTable::patch_bytecode(Bytecodes::Code bc, Register bc_reg,
+       // additional, required work.
+       assert(byte_no == f1_byte || byte_no == f2_byte, "byte_no out of range");
+       assert(load_bc_into_bc_reg, "we use bc_reg as temp");
+-      __ get_cache_and_index_and_bytecode_at_bcp(bc_reg, temp_reg, temp_reg, byte_no, 1);
++      __ load_field_entry(temp_reg, bc_reg);
++      if (byte_no == f1_byte) {
++        __ ldub(temp_reg, in_bytes(ResolvedFieldEntry::get_code_offset()), temp_reg);
++      } else {
++        __ ldub(temp_reg, in_bytes(ResolvedFieldEntry::put_code_offset()), temp_reg);
++      }
+       __ set(bc, bc_reg);
+       __ cmp_and_br_short(temp_reg, 0, Assembler::equal, Assembler::pn, L_patch_done);  // don't patch
+     }
+@@ -413,13 +421,11 @@ void TemplateTable::condy_helper(Label& exit) {
+   __ get_vm_result_2(G3_scratch);
+ 
+   // Get offset
+-  __ set((int)ConstantPoolCacheEntry::field_index_mask, Roffset);
++  __ set((int)ConstantPoolCache::field_index_mask, Roffset);
+   __ and3(G3_scratch, Roffset, Roffset);
+ 
+   // compute type
+-  __ srl(G3_scratch, ConstantPoolCacheEntry::tos_state_shift, Rflags);
+-  // Make sure we don't need to mask Rflags after the above shift
+-  ConstantPoolCacheEntry::verify_tos_state_shift();
++  __ srl(G3_scratch, ConstantPoolCache::tos_state_shift, Rflags);
+ 
+   switch (bytecode()) {
+   case Bytecodes::_ldc:
+@@ -2062,21 +2068,24 @@ void TemplateTable::volatile_barrier(Assembler::Membar_mask_bits order_constrain
+ }
+ 
+ // ----------------------------------------------------------------------------
+-void TemplateTable::resolve_cache_and_index(int byte_no,
+-                                            Register Rcache,
+-                                            Register index,
+-                                            size_t index_size) {
+-  // Depends on cpCacheOop layout!
+-
++void TemplateTable::resolve_cache_and_index_for_field(int byte_no,
++                                                      Register Rcache,
++                                                      Register index) {
+   Label resolved;
+   Bytecodes::Code code = bytecode();
+   switch (code) {
+   case Bytecodes::_nofast_getfield: code = Bytecodes::_getfield; break;
+   case Bytecodes::_nofast_putfield: code = Bytecodes::_putfield; break;
++  default: break;
+   }
+ 
+   assert(byte_no == f1_byte || byte_no == f2_byte, "byte_no out of range");
+-  __ get_cache_and_index_and_bytecode_at_bcp(Rcache, index, Lbyte_code, byte_no, 1, index_size);
++  __ load_field_entry(Rcache, index);
++  if (byte_no == f1_byte) {
++    __ ldub(Rcache, in_bytes(ResolvedFieldEntry::get_code_offset()), Lbyte_code);
++  } else {
++    __ ldub(Rcache, in_bytes(ResolvedFieldEntry::put_code_offset()), Lbyte_code);
++  }
+   __ cmp(Lbyte_code, code);  // have we resolved this bytecode?
+   __ br(Assembler::equal, false, Assembler::pt, resolved);
+   __ delayed()->set(code, O1);
+@@ -2085,74 +2094,152 @@ void TemplateTable::resolve_cache_and_index(int byte_no,
+   // first time invocation - must resolve first
+   __ call_VM(noreg, entry, O1);
+   // Update registers with resolved info
+-  __ get_cache_and_index_at_bcp(Rcache, index, 1, index_size);
++  __ load_field_entry(Rcache, index);
+   __ bind(resolved);
+ }
+ 
+-void TemplateTable::load_invoke_cp_cache_entry(int byte_no,
+-                                               Register method,
+-                                               Register itable_index,
+-                                               Register flags,
+-                                               bool is_invokevirtual,
+-                                               bool is_invokevfinal,
+-                                               bool is_invokedynamic) {
+-  // Uses both G3_scratch and G4_scratch
+-  Register cache = G3_scratch;
+-  Register index = G4_scratch;
+-  assert_different_registers(cache, method, itable_index);
+-
+-  // determine constant pool cache field offsets
+-  assert(is_invokevirtual == (byte_no == f2_byte), "is_invokevirtual flag redundant");
+-  const int method_offset = in_bytes(
+-      ConstantPoolCache::base_offset() +
+-      ((byte_no == f2_byte)
+-       ? ConstantPoolCacheEntry::f2_offset()
+-       : ConstantPoolCacheEntry::f1_offset()
+-      )
+-    );
+-  const int flags_offset = in_bytes(ConstantPoolCache::base_offset() +
+-                                    ConstantPoolCacheEntry::flags_offset());
+-  // access constant pool cache fields
+-  const int index_offset = in_bytes(ConstantPoolCache::base_offset() +
+-                                    ConstantPoolCacheEntry::f2_offset());
+-
+-  if (is_invokevfinal) {
+-    __ get_cache_and_index_at_bcp(cache, index, 1);
+-    __ ld_ptr(Address(cache, method_offset), method);
++void TemplateTable::resolve_cache_and_index_for_method(int byte_no,
++                                                       Register Rcache,
++                                                       Register index) {
++  Label resolved;
++  Bytecodes::Code code = bytecode();
++
++  assert(byte_no == f1_byte || byte_no == f2_byte, "byte_no out of range");
++  __ load_method_entry(Rcache, index);
++  if (byte_no == f1_byte) {
++    __ ldub(Rcache, in_bytes(ResolvedMethodEntry::bytecode1_offset()), Lbyte_code);
+   } else {
+-    size_t index_size = sizeof(u2);
+-    resolve_cache_and_index(byte_no, cache, index, index_size);
+-    __ ld_ptr(Address(cache, method_offset), method);
++    __ ldub(Rcache, in_bytes(ResolvedMethodEntry::bytecode2_offset()), Lbyte_code);
+   }
++  __ cmp(Lbyte_code, code);  // have we resolved this bytecode?
++  __ br(Assembler::equal, false, Assembler::pt, resolved);
++  __ delayed()->set(code, O1);
+ 
+-  if (itable_index != noreg) {
+-    // pick up itable or appendix index from f2 also:
+-    __ ld_ptr(Address(cache, index_offset), itable_index);
+-  }
+-  __ ld_ptr(Address(cache, flags_offset), flags);
++  address entry = CAST_FROM_FN_PTR(address, InterpreterRuntime::resolve_from_cache);
++  // first time invocation - must resolve first
++  __ call_VM(noreg, entry, O1);
++  // Update registers with resolved info
++  __ load_method_entry(Rcache, index);
++  __ bind(resolved);
+ }
+ 
+-// The Rcache register must be set before call
+-void TemplateTable::load_field_cp_cache_entry(Register Robj,
+-                                              Register Rcache,
+-                                              Register index,
+-                                              Register Roffset,
+-                                              Register Rflags,
++// The static mirror is loaded last since obj may be the cache register.
++void TemplateTable::load_resolved_field_entry(Register obj,
++                                              Register cache,
++                                              Register tos_state,
++                                              Register offset,
++                                              Register flags,
+                                               bool is_static) {
+-  assert_different_registers(Rcache, Rflags, Roffset, Lscratch);
+-
+-  ByteSize cp_base_offset = ConstantPoolCache::base_offset();
++  assert_different_registers(cache, tos_state, flags, offset, Lscratch);
+ 
+-  __ ld_ptr(Rcache, cp_base_offset + ConstantPoolCacheEntry::flags_offset(), Rflags);
+-  __ ld_ptr(Rcache, cp_base_offset + ConstantPoolCacheEntry::f2_offset(), Roffset);
++  __ ldsw(cache, in_bytes(ResolvedFieldEntry::field_offset_offset()), offset);
++  __ ldub(cache, in_bytes(ResolvedFieldEntry::flags_offset()), flags);
++  __ ldub(cache, in_bytes(ResolvedFieldEntry::type_offset()), tos_state);
+   if (is_static) {
+-    __ ld_ptr(Rcache, cp_base_offset + ConstantPoolCacheEntry::f1_offset(), Robj);
++    __ ld_ptr(cache, in_bytes(ResolvedFieldEntry::field_holder_offset()), obj);
+     const int mirror_offset = in_bytes(Klass::java_mirror_offset());
+-    __ ld_ptr( Robj, mirror_offset, Robj);
+-    __ resolve_oop_handle(Robj, Lscratch);
++    __ ld_ptr(obj, mirror_offset, obj);
++    __ resolve_oop_handle(obj, Lscratch);
+   }
+ }
+ 
++void TemplateTable::load_resolved_method_entry_special_or_static(Register cache,
++                                                                 Register method,
++                                                                 Register flags) {
++  const Register index = O3;
++  assert_different_registers(cache, method, flags, index);
++
++  resolve_cache_and_index_for_method(f1_byte, cache, index);
++  __ ldub(cache, in_bytes(ResolvedMethodEntry::flags_offset()), flags);
++  __ ld_ptr(cache, in_bytes(ResolvedMethodEntry::method_offset()), method);
++}
++
++void TemplateTable::load_resolved_method_entry_handle(Register cache,
++                                                      Register method,
++                                                      Register ref_index,
++                                                      Register flags) {
++  const Register index = O3;
++  const Register appendix = method;
++  assert_different_registers(cache, method, ref_index, flags, index, O4);
++
++  resolve_cache_and_index_for_method(f1_byte, cache, index);
++  __ ldub(cache, in_bytes(ResolvedMethodEntry::flags_offset()), flags);
++
++  // Maybe push appendix
++  Label L_no_push;
++  __ btst((1 << ResolvedMethodEntry::has_appendix_shift), flags);
++  __ br(Assembler::zero, false, Assembler::pt, L_no_push);
++  __ delayed()->nop();
++  // invokehandle uses an index into the resolved references array
++  __ lduh(cache, in_bytes(ResolvedMethodEntry::resolved_references_index_offset()), ref_index);
++  // Push the appendix as a trailing parameter.
++  // This must be done before we get the receiver,
++  // since the parameter_size includes it.
++  __ load_resolved_reference_at_index(appendix, ref_index, /*tmp*/ O4);
++  __ verify_oop(appendix);
++  __ push_ptr(appendix);  // push appendix (MethodType, CallSite, etc.)
++  __ bind(L_no_push);
++
++  __ ld_ptr(cache, in_bytes(ResolvedMethodEntry::method_offset()), method);
++}
++
++void TemplateTable::load_resolved_method_entry_interface(Register cache,
++                                                         Register klass,
++                                                         Register method_or_table_index,
++                                                         Register flags) {
++  const Register index = O3;
++  assert_different_registers(cache, klass, method_or_table_index, flags, index);
++
++  resolve_cache_and_index_for_method(f1_byte, cache, index);
++  __ ldub(cache, in_bytes(ResolvedMethodEntry::flags_offset()), flags);
++
++  // Invokeinterface can behave in different ways:
++  // If calling a method from java.lang.Object, the forced virtual flag is true so the invocation will
++  // behave like an invokevirtual call. The state of the virtual final flag will determine whether a method or
++  // vtable index is placed in the register.
++  // Otherwise, the registers will be populated with the klass and method.
++  Label NotVirtual, NotVFinal, Done;
++  __ btst((1 << ResolvedMethodEntry::is_forced_virtual_shift), flags);
++  __ br(Assembler::zero, false, Assembler::pt, NotVirtual);
++  __ delayed()->nop();
++  __ btst((1 << ResolvedMethodEntry::is_vfinal_shift), flags);
++  __ br(Assembler::zero, false, Assembler::pt, NotVFinal);
++  __ delayed()->nop();
++  __ ld_ptr(cache, in_bytes(ResolvedMethodEntry::method_offset()), method_or_table_index);
++  __ ba_short(Done);
++
++  __ bind(NotVFinal);
++  __ lduh(cache, in_bytes(ResolvedMethodEntry::table_index_offset()), method_or_table_index);
++  __ ba_short(Done);
++
++  __ bind(NotVirtual);
++  __ ld_ptr(cache, in_bytes(ResolvedMethodEntry::method_offset()), method_or_table_index);
++  __ ld_ptr(cache, in_bytes(ResolvedMethodEntry::klass_offset()), klass);
++  __ bind(Done);
++}
++
++void TemplateTable::load_resolved_method_entry_virtual(Register cache,
++                                                       Register method_or_table_index,
++                                                       Register flags) {
++  const Register index = O3;
++  assert_different_registers(cache, method_or_table_index, flags, index);
++
++  resolve_cache_and_index_for_method(f2_byte, cache, index);
++  __ ldub(cache, in_bytes(ResolvedMethodEntry::flags_offset()), flags);
++
++  // method_or_table_index can either be a vtable index or a method depending on the virtual final flag
++  Label isVFinal, Done;
++  __ btst((1 << ResolvedMethodEntry::is_vfinal_shift), flags);
++  __ br(Assembler::notZero, false, Assembler::pt, isVFinal);
++  __ delayed()->nop();
++  __ lduh(cache, in_bytes(ResolvedMethodEntry::table_index_offset()), method_or_table_index);
++  __ ba_short(Done);
++  __ bind(isVFinal);
++  __ ld_ptr(cache, in_bytes(ResolvedMethodEntry::method_offset()), method_or_table_index);
++  __ bind(Done);
++}
++
++// The Rcache register must be set before call
+ // The registers Rcache and index expected to be set before call.
+ // Correct values of the Rcache and index registers are preserved.
+ void TemplateTable::jvmti_post_field_access(Register Rcache,
+@@ -2170,8 +2257,6 @@ void TemplateTable::jvmti_post_field_access(Register Rcache,
+     __ load_contents(get_field_access_count_addr, G1_scratch);
+     __ cmp_and_br_short(G1_scratch, 0, Assembler::equal, Assembler::pt, Label1);
+ 
+-    __ add(Rcache, in_bytes(cp_base_offset), Rcache);
+-
+     if (is_static) {
+       __ clr(Otos_i);
+     } else {
+@@ -2192,7 +2277,7 @@ void TemplateTable::jvmti_post_field_access(Register Rcache,
+       __ pop_ptr(Otos_i);  // restore object pointer
+       __ verify_oop(Otos_i);
+     }
+-    __ get_cache_and_index_at_bcp(Rcache, index, 1);
++    __ load_field_entry(Rcache, index);
+     __ bind(Label1);
+   }
+ }
+@@ -2207,9 +2292,12 @@ void TemplateTable::getfield_or_static(int byte_no, bool is_static, RewriteContr
+   Register Rflags = G1_scratch;
+   ByteSize cp_base_offset = ConstantPoolCache::base_offset();
+ 
+-  resolve_cache_and_index(byte_no, Rcache, index, sizeof(u2));
++  Register Rtos   = Rflags;
++  Register Rfield_flags = O1;
++
++  resolve_cache_and_index_for_field(byte_no, Rcache, index);
+   jvmti_post_field_access(Rcache, index, is_static, false);
+-  load_field_cp_cache_entry(Rclass, Rcache, index, Roffset, Rflags, is_static);
++  load_resolved_field_entry(Rclass, Rcache, Rtos, Roffset, Rfield_flags, is_static);
+ 
+   if (!is_static) {
+     pop_and_check_object(Rclass);
+@@ -2224,17 +2312,13 @@ void TemplateTable::getfield_or_static(int byte_no, bool is_static, RewriteContr
+ 
+   if (__ membar_has_effect(membar_bits)) {
+     // Get volatile flag
+-    __ set((1 << ConstantPoolCacheEntry::is_volatile_shift), Lscratch);
+-    __ and3(Rflags, Lscratch, Lscratch);
++    __ and3(Rfield_flags, (1 << ResolvedFieldEntry::is_volatile_shift), Lscratch);
+   }
+ 
+   Label checkVolatile;
+ 
+   // compute field type
+   Label notByte, notBool, notInt, notShort, notChar, notLong, notFloat, notObj;
+-  __ srl(Rflags, ConstantPoolCacheEntry::tos_state_shift, Rflags);
+-  // Make sure we don't need to mask Rflags after the above shift
+-  ConstantPoolCacheEntry::verify_tos_state_shift();
+ 
+   // Check atos before itos for getstatic, more likely (in Queens at least)
+   __ cmp(Rflags, atos);
+@@ -2400,10 +2484,10 @@ void TemplateTable::fast_accessfield(TosState state) {
+   Register Rflags  = Rcache;
+   ByteSize cp_base_offset = ConstantPoolCache::base_offset();
+ 
+-  __ get_cache_and_index_at_bcp(Rcache, index, 1);
++  __ load_field_entry(Rcache, index);
+   jvmti_post_field_access(Rcache, index, /*is_static*/false, /*has_tos*/true);
+ 
+-  __ ld_ptr(Rcache, cp_base_offset + ConstantPoolCacheEntry::f2_offset(), Roffset);
++  __ ldsw(Rcache, in_bytes(ResolvedFieldEntry::field_offset_offset()), Roffset);
+ 
+   __ null_check(Otos_i);
+   __ verify_oop(Otos_i);
+@@ -2414,8 +2498,8 @@ void TemplateTable::fast_accessfield(TosState state) {
+     Assembler::Membar_mask_bits(Assembler::LoadLoad | Assembler::LoadStore);
+   if (__ membar_has_effect(membar_bits)) {
+     // Get volatile flag
+-    __ ld_ptr(Rcache, cp_base_offset + ConstantPoolCacheEntry::f2_offset(), Rflags);
+-    __ set((1 << ConstantPoolCacheEntry::is_volatile_shift), Lscratch);
++    __ ldub(Rcache, in_bytes(ResolvedFieldEntry::flags_offset()), Rflags);
++    __ set((1 << ResolvedFieldEntry::is_volatile_shift), Lscratch);
+   }
+ 
+   switch (bytecode()) {
+@@ -2471,7 +2555,7 @@ void TemplateTable::jvmti_post_fast_field_mod() {
+     __ pop_ptr(G4_scratch);     // copy the object pointer from tos
+     __ verify_oop(G4_scratch);
+     __ push_ptr(G4_scratch);    // put the object pointer back on tos
+-    __ get_cache_entry_pointer_at_bcp(G1_scratch, G3_scratch, 1);
++    __ load_field_entry(G1_scratch, G3_scratch);
+     // Save tos values before call_VM() clobbers them. Since we have
+     // to do it for every data type, we use the saved values as the
+     // jvalue object.
+@@ -2525,9 +2609,8 @@ void TemplateTable::jvmti_post_field_mod(Register Rcache, Register index, bool i
+     // The Rcache and index registers have been already set.
+     // This allows to eliminate this call but the Rcache and index
+     // registers must be correspondingly used after this line.
+-    __ get_cache_and_index_at_bcp(G1_scratch, G4_scratch, 1);
++    __ load_field_entry(G3_scratch, G4_scratch);
+ 
+-    __ add(G1_scratch, in_bytes(cp_base_offset), G3_scratch);
+     if (is_static) {
+       // Life is simple.  Null out the object pointer.
+       __ clr(G4_scratch);
+@@ -2539,11 +2622,8 @@ void TemplateTable::jvmti_post_field_mod(Register Rcache, Register index, bool i
+       // the type to determine where the object is.
+ 
+       Label two_word, valsizeknown;
+-      __ ld_ptr(G1_scratch, cp_base_offset + ConstantPoolCacheEntry::flags_offset(), Rflags);
++      __ ldub(G3_scratch, in_bytes(ResolvedFieldEntry::type_offset()), Rflags);
+       __ mov(Lesp, G4_scratch);
+-      __ srl(Rflags, ConstantPoolCacheEntry::tos_state_shift, Rflags);
+-      // Make sure we don't need to mask Rflags after the above shift
+-      ConstantPoolCacheEntry::verify_tos_state_shift();
+       __ cmp(Rflags, ltos);
+       __ br(Assembler::equal, false, Assembler::pt, two_word);
+       __ delayed()->cmp(Rflags, dtos);
+@@ -2567,7 +2647,7 @@ void TemplateTable::jvmti_post_field_mod(Register Rcache, Register index, bool i
+     // G1_scratch: jvalue object on the stack
+     __ call_VM(noreg, CAST_FROM_FN_PTR(address, InterpreterRuntime::post_field_modification),
+                G4_scratch, G3_scratch, G1_scratch);
+-    __ get_cache_and_index_at_bcp(Rcache, index, 1);
++    __ load_field_entry(Rcache, index);
+     __ bind(Label1);
+   }
+ }
+@@ -2587,9 +2667,12 @@ void TemplateTable::putfield_or_static(int byte_no, bool is_static, RewriteContr
+   Register Rflags = G1_scratch;
+   ByteSize cp_base_offset = ConstantPoolCache::base_offset();
+ 
+-  resolve_cache_and_index(byte_no, Rcache, index, sizeof(u2));
++  Register Rtos   = Rflags;
++  Register Rfield_flags = O1;
++
++  resolve_cache_and_index_for_field(byte_no, Rcache, index);
+   jvmti_post_field_mod(Rcache, index, is_static);
+-  load_field_cp_cache_entry(Rclass, Rcache, index, Roffset, Rflags, is_static);
++  load_resolved_field_entry(Rclass, Rcache, Rtos, Roffset, Rfield_flags, is_static);
+ 
+   Assembler::Membar_mask_bits read_bits =
+     Assembler::Membar_mask_bits(Assembler::LoadStore | Assembler::StoreStore);
+@@ -2597,8 +2680,7 @@ void TemplateTable::putfield_or_static(int byte_no, bool is_static, RewriteContr
+ 
+   Label notVolatile, checkVolatile, exit;
+   if (__ membar_has_effect(read_bits) || __ membar_has_effect(write_bits)) {
+-    __ set((1 << ConstantPoolCacheEntry::is_volatile_shift), Lscratch);
+-    __ and3(Rflags, Lscratch, Lscratch);
++    __ and3(Rfield_flags, (1 << ResolvedFieldEntry::is_volatile_shift), Lscratch);
+ 
+     if (__ membar_has_effect(read_bits)) {
+       __ cmp_and_br_short(Lscratch, 0, Assembler::equal, Assembler::pt, notVolatile);
+@@ -2607,10 +2689,6 @@ void TemplateTable::putfield_or_static(int byte_no, bool is_static, RewriteContr
+     }
+   }
+ 
+-  __ srl(Rflags, ConstantPoolCacheEntry::tos_state_shift, Rflags);
+-  // Make sure we don't need to mask Rflags after the above shift
+-  ConstantPoolCacheEntry::verify_tos_state_shift();
+-
+   // compute field type
+   Label notInt, notShort, notChar, notObj, notByte, notBool, notLong, notFloat;
+ 
+@@ -2815,7 +2893,7 @@ void TemplateTable::fast_storefield(TosState state) {
+ 
+   jvmti_post_fast_field_mod();
+ 
+-  __ get_cache_and_index_at_bcp(Rcache, G4_scratch, 1);
++  __ load_field_entry(Rcache, G4_scratch);
+ 
+   Assembler::Membar_mask_bits read_bits =
+     Assembler::Membar_mask_bits(Assembler::LoadStore | Assembler::StoreStore);
+@@ -2823,9 +2901,8 @@ void TemplateTable::fast_storefield(TosState state) {
+ 
+   Label notVolatile, checkVolatile, exit;
+   if (__ membar_has_effect(read_bits) || __ membar_has_effect(write_bits)) {
+-    __ ld_ptr(Rcache, cp_base_offset + ConstantPoolCacheEntry::flags_offset(), Rflags);
+-    __ set((1 << ConstantPoolCacheEntry::is_volatile_shift), Lscratch);
+-    __ and3(Rflags, Lscratch, Lscratch);
++    __ ldub(Rcache, in_bytes(ResolvedFieldEntry::flags_offset()), Rflags);
++    __ and3(Rflags, (1 << ResolvedFieldEntry::is_volatile_shift), Lscratch);
+     if (__ membar_has_effect(read_bits)) {
+       __ cmp_and_br_short(Lscratch, 0, Assembler::equal, Assembler::pt, notVolatile);
+       volatile_barrier(read_bits);
+@@ -2833,7 +2910,7 @@ void TemplateTable::fast_storefield(TosState state) {
+     }
+   }
+ 
+-  __ ld_ptr(Rcache, cp_base_offset + ConstantPoolCacheEntry::f2_offset(), Roffset);
++  __ ldsw(Rcache, in_bytes(ResolvedFieldEntry::field_offset_offset()), Roffset);
+   pop_and_check_object(Rclass);
+ 
+   switch (bytecode()) {
+@@ -2885,8 +2962,8 @@ void TemplateTable::fast_xaccess(TosState state) {
+   __ ld_ptr(Llocals, 0, Rreceiver);
+ 
+   // access constant pool cache  (is resolved)
+-  __ get_cache_and_index_at_bcp(Rcache, G4_scratch, 2);
+-  __ ld_ptr(Rcache, ConstantPoolCache::base_offset() + ConstantPoolCacheEntry::f2_offset(), Roffset);
++  __ load_field_entry(Rcache, G4_scratch, 2);
++  __ ldsw(Rcache, in_bytes(ResolvedFieldEntry::field_offset_offset()), Roffset);
+   __ add(Lbcp, 1, Lbcp);       // needed to report exception at the correct bcp
+ 
+   __ verify_oop(Rreceiver);
+@@ -2906,11 +2983,11 @@ void TemplateTable::fast_xaccess(TosState state) {
+   if (__ membar_has_effect(membar_bits)) {
+ 
+     // Get is_volatile value in Rflags and check if membar is needed
+-    __ ld_ptr(Rcache, ConstantPoolCache::base_offset() + ConstantPoolCacheEntry::flags_offset(), Rflags);
++    __ ldub(Rcache, in_bytes(ResolvedFieldEntry::flags_offset()), Rflags);
+ 
+     // Test volatile
+     Label notVolatile;
+-    __ set((1 << ConstantPoolCacheEntry::is_volatile_shift), Lscratch);
++    __ set((1 << ResolvedFieldEntry::is_volatile_shift), Lscratch);
+     __ btst(Rflags, Lscratch);
+     __ br(Assembler::zero, false, Assembler::pt, notVolatile);
+     __ delayed()->nop();
+@@ -2935,52 +3012,40 @@ void TemplateTable::prepare_invoke(int byte_no,
+   // determine flags
+   const Bytecodes::Code code = bytecode();
+   const bool is_invokeinterface  = code == Bytecodes::_invokeinterface;
+-  const bool is_invokedynamic    = code == Bytecodes::_invokedynamic;
+   const bool is_invokehandle     = code == Bytecodes::_invokehandle;
+-  const bool is_invokevirtual    = code == Bytecodes::_invokevirtual;
+-  const bool is_invokespecial    = code == Bytecodes::_invokespecial;
+   const bool load_receiver       = (recv != noreg);
+   assert(load_receiver == (code != Bytecodes::_invokestatic && code != Bytecodes::_invokedynamic), "");
+   assert(recv  == noreg || recv  == O0, "");
+   assert(flags == noreg || flags == O1, "");
+ 
+-  // setup registers & access constant pool cache
++  // setup registers & access the resolved method entry
+   if (recv  == noreg)  recv  = O0;
+   if (flags == noreg)  flags = O1;
++  const Register cache = G3_scratch;
+   const Register temp = O2;
+-  assert_different_registers(method, ra, index, recv, flags, temp);
++  // ra may be cache: the return type is the last thing read from the entry
++  assert_different_registers(method, recv, flags, temp, cache);
+ 
+-  load_invoke_cp_cache_entry(byte_no, method, index, flags, is_invokevirtual, false, is_invokedynamic);
++  if (is_invokeinterface) {
++    load_resolved_method_entry_interface(cache, method, index, flags);
++  } else if (is_invokehandle) {
++    load_resolved_method_entry_handle(cache, method, index, flags);
++  } else {
++    assert(code == Bytecodes::_invokespecial || code == Bytecodes::_invokestatic, "unexpected bytecode");
++    load_resolved_method_entry_special_or_static(cache, method, flags);
++  }
+ 
+   __ mov(SP, O5_savedSP);  // record SP that we wanted the callee to restore
+ 
+-  // maybe push appendix to arguments
+-  if (is_invokehandle) {
+-    Label L_no_push;
+-    __ set((1 << ConstantPoolCacheEntry::has_appendix_shift), temp);
+-    __ btst(flags, temp);
+-    __ br(Assembler::zero, false, Assembler::pt, L_no_push);
+-    __ delayed()->nop();
+-    // Push the appendix as a trailing parameter.
+-    // This must be done before we get the receiver,
+-    // since the parameter_size includes it.
+-    __ load_resolved_reference_at_index(temp, index, /*tmp*/recv);
+-    __ verify_oop(temp);
+-    __ push_ptr(temp);  // push appendix (MethodType, CallSite, etc.)
+-    __ bind(L_no_push);
+-  }
+-
+   // load receiver if needed (after appendix is pushed so parameter size is correct)
+   if (load_receiver) {
+-    __ and3(flags, ConstantPoolCacheEntry::parameter_size_mask, temp);  // get parameter size
++    __ lduh(cache, in_bytes(ResolvedMethodEntry::num_parameters_offset()), temp);
+     __ load_receiver(temp, recv);  //  __ argument_address uses Gargs but we need Lesp
+     __ verify_oop(recv);
+   }
+ 
+   // compute return type
+-  __ srl(flags, ConstantPoolCacheEntry::tos_state_shift, ra);
+-  // Make sure we don't need to mask flags after the above shift
+-  ConstantPoolCacheEntry::verify_tos_state_shift();
++  __ ldub(cache, in_bytes(ResolvedMethodEntry::type_offset()), ra);
+   // load return address
+   {
+     const address table_addr = (address) Interpreter::invoke_return_entry_table_for(code);
+@@ -3011,36 +3076,31 @@ void TemplateTable::invokevirtual(int byte_no) {
+   Register Rtemp    = G4_scratch;
+   Register Rret     = Lscratch;
+   Register O0_recv  = O0;
++  Register Rflags   = O1;
+   Label notFinal;
+ 
+-  load_invoke_cp_cache_entry(byte_no, G5_method, noreg, Rret, true, false, false);
++  load_resolved_method_entry_virtual(Rscratch, G5_method, Rflags);
++  __ lduh(Rscratch, in_bytes(ResolvedMethodEntry::num_parameters_offset()), Rtemp);
++  __ ldub(Rscratch, in_bytes(ResolvedMethodEntry::type_offset()), Rret);
+   __ mov(SP, O5_savedSP); // record SP that we wanted the callee to restore
+ 
+   // Check for vfinal
+-  __ set((1 << ConstantPoolCacheEntry::is_vfinal_shift), G4_scratch);
+-  __ btst(Rret, G4_scratch);
++  __ btst((1 << ResolvedMethodEntry::is_vfinal_shift), Rflags);
+   __ br(Assembler::zero, false, Assembler::pt, notFinal);
+-  __ delayed()->and3(Rret, 0xFF, G4_scratch);      // gets number of parameters
+-
+-  if (RewriteBytecodes && !UseSharedSpaces && !DumpSharedSpaces) {
+-    patch_bytecode(Bytecodes::_fast_invokevfinal, Rscratch, Rtemp);
+-  }
++  __ delayed()->nop();
+ 
+   invokevfinal_helper(Rscratch, Rret);
+ 
+   __ bind(notFinal);
+ 
+   __ mov(G5_method, Rscratch);  // better scratch register
+-  __ load_receiver(G4_scratch, O0_recv);  // gets receiverOop
++  __ load_receiver(Rtemp, O0_recv);  // gets receiverOop
+   // receiver is in O0_recv
+   __ verify_oop(O0_recv);
+ 
+   // get return address
+   AddressLiteral table(Interpreter::invoke_return_entry_table());
+   __ set(table, Rtemp);
+-  __ srl(Rret, ConstantPoolCacheEntry::tos_state_shift, Rret);          // get return type
+-  // Make sure we don't need to mask Rret after the above shift
+-  ConstantPoolCacheEntry::verify_tos_state_shift();
+   __ sll(Rret,  LogBytesPerWord, Rret);
+   __ ld_ptr(Rtemp, Rret, Rret);         // get return address
+ 
+@@ -3057,11 +3117,7 @@ void TemplateTable::invokevirtual(int byte_no) {
+ void TemplateTable::fast_invokevfinal(int byte_no) {
+   transition(vtos, vtos);
+   assert(byte_no == f2_byte, "use this argument");
+-
+-  load_invoke_cp_cache_entry(byte_no, G5_method, noreg, Lscratch, true,
+-                             /*is_invokevfinal*/true, false);
+-  __ mov(SP, O5_savedSP); // record SP that we wanted the callee to restore
+-  invokevfinal_helper(G3_scratch, Lscratch);
++  __ stop("fast_invokevfinal not used on sparc");
+ }
+ 
+ void TemplateTable::invokevfinal_helper(Register Rscratch, Register Rret) {
+@@ -3072,7 +3128,7 @@ void TemplateTable::invokevfinal_helper(Register Rscratch, Register Rret) {
+   __ lduh(G4_scratch, in_bytes(ConstMethod::size_of_parameters_offset()), G4_scratch);
+   __ load_receiver(G4_scratch, O0);
+ 
+-  // receiver NULL check
++  // receiver null check
+   __ null_check(O0);
+ 
+   __ profile_final_call(O4);
+@@ -3081,9 +3137,6 @@ void TemplateTable::invokevfinal_helper(Register Rscratch, Register Rret) {
+   // get return address
+   AddressLiteral table(Interpreter::invoke_return_entry_table());
+   __ set(table, Rtemp);
+-  __ srl(Rret, ConstantPoolCacheEntry::tos_state_shift, Rret);          // get return type
+-  // Make sure we don't need to mask Rret after the above shift
+-  ConstantPoolCacheEntry::verify_tos_state_shift();
+   __ sll(Rret,  LogBytesPerWord, Rret);
+   __ ld_ptr(Rtemp, Rret, Rret);         // get return address
+ 
+@@ -3138,7 +3191,7 @@ void TemplateTable::invokeinterface_object_method(Register RKlass,
+   Label notFinal;
+ 
+   // Check for vfinal
+-  __ set((1 << ConstantPoolCacheEntry::is_vfinal_shift), Rscratch);
++  __ set((1 << ResolvedMethodEntry::is_vfinal_shift), Rscratch);
+   __ btst(Rflags, Rscratch);
+   __ br(Assembler::zero, false, Assembler::pt, notFinal);
+   __ delayed()->nop();
+@@ -3182,7 +3235,7 @@ void TemplateTable::invokeinterface(int byte_no) {
+   // Special case of invokeinterface called for virtual method of
+   // java.lang.Object.  See cpCache.cpp for details.
+   Label notObjectMethod;
+-  __ set((1 << ConstantPoolCacheEntry::is_forced_virtual_shift), Rscratch);
++  __ set((1 << ResolvedMethodEntry::is_forced_virtual_shift), Rscratch);
+   __ btst(O1_flags, Rscratch);
+   __ br(Assembler::zero, false, Assembler::pt, notObjectMethod);
+   __ delayed()->nop();
+@@ -3196,7 +3249,7 @@ void TemplateTable::invokeinterface(int byte_no) {
+   // Check for private method invocation - indicated by vfinal
+   Label notVFinal;
+   {
+-    __ set((1 << ConstantPoolCacheEntry::is_vfinal_shift), Rscratch);
++    __ set((1 << ResolvedMethodEntry::is_vfinal_shift), Rscratch);
+     __ btst(O1_flags, Rscratch);
+     __ br(Assembler::zero, false, Assembler::pt, notVFinal);
+     __ delayed()->nop();
+@@ -3297,7 +3350,6 @@ void TemplateTable::invokehandle(int byte_no) {
+   // Note:  G4_mtype is already pushed (if necessary) by prepare_invoke
+ 
+   // do the call
+-  __ verify_oop(G4_mtype);
+   __ profile_final_call(O4);  // FIXME: profile the LambdaForm also
+   __ profile_arguments_type(G5_method, Rscratch, Gargs, true);
+   __ call_from_interpreter(Rscratch, Gargs, Rret);
+diff --git a/src/hotspot/cpu/sparc/upcallLinker_sparc.cpp b/src/hotspot/cpu/sparc/upcallLinker_sparc.cpp
+index 3e1fb0421..c7645f4a0 100644
+--- a/src/hotspot/cpu/sparc/upcallLinker_sparc.cpp
++++ b/src/hotspot/cpu/sparc/upcallLinker_sparc.cpp
+@@ -26,7 +26,6 @@
+ #include "utilities/debug.hpp"
+ 
+ address UpcallLinker::make_upcall_stub(jobject receiver, Method* entry,
+-                                       BasicType* in_sig_bt, int total_in_args,
+                                        BasicType* out_sig_bt, int total_out_args,
+                                        BasicType ret_type,
+                                        jobject jabi, jobject jconv,
+diff --git a/src/hotspot/cpu/sparc/vm_version_sparc.cpp b/src/hotspot/cpu/sparc/vm_version_sparc.cpp
+index 4208a400b..210fb6d11 100644
+--- a/src/hotspot/cpu/sparc/vm_version_sparc.cpp
++++ b/src/hotspot/cpu/sparc/vm_version_sparc.cpp
+@@ -65,7 +65,7 @@ void VM_Version::initialize() {
+   intx cache_line_size = prefetch_data_size();
+ 
+   if (FLAG_IS_DEFAULT(AllocatePrefetchStepSize)) {
+-    AllocatePrefetchStepSize = MAX2(AllocatePrefetchStepSize, cache_line_size);
++    AllocatePrefetchStepSize = MAX2(AllocatePrefetchStepSize, (int)cache_line_size);
+   }
+ 
+   if (AllocatePrefetchInstr == 1) {
+@@ -79,7 +79,6 @@ void VM_Version::initialize() {
+     }
+   }
+ 
+-  _supports_cx8 = true;             // All SPARC V9 implementations.
+   _supports_atomic_getset4 = true;  // Using the 'swap' instruction.
+ 
+   if (has_fast_ind_br() && FLAG_IS_DEFAULT(UseInlineCaches)) {
+@@ -95,7 +94,6 @@ void VM_Version::initialize() {
+   // 32-bit oops don't make sense for the 64-bit VM on SPARC since the 32-bit
+   // VM has the same registers and smaller objects.
+   CompressedOops::set_shift(LogMinObjAlignmentInBytes);
+-  CompressedKlassPointers::set_shift(LogKlassAlignmentInBytes);
+ 
+ #ifdef COMPILER2
+   if (has_fast_ind_br() && FLAG_IS_DEFAULT(UseJumpTables)) {

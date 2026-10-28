@@ -1,0 +1,9 @@
+-p1 jdk25u-jdk-25.0.5.0.2-ga/restore_os_cpu_linux_sparc.patch
+-p1 jdk25u-jdk-25.0.5.0.2-ga/linux-sparc-1.patch
+-p1 jdk25u-jdk-25.0.5.0.2-ga/linux-sparc-19u.patch
+-p1 jdk25u-jdk-25.0.5.0.2-ga/linux-sparc-20.patch
+-p1 jdk25u-jdk-25.0.5.0.2-ga/linux-sparc-21.patch
+-p1 jdk25u-jdk-25.0.5.0.2-ga/linux-sparc-22.patch
+-p1 jdk25u-jdk-25.0.5.0.2-ga/linux-sparc-23.patch
+-p1 jdk25u-jdk-25.0.5.0.2-ga/linux-sparc-24.patch
+-p1 jdk25u-jdk-25.0.5.0.2-ga/linux-sparc-25.patch
