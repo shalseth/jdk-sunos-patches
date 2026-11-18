@@ -11,8 +11,8 @@ GCC 16.2, with jtreg tier1 on both release and fastdebug builds.
 
 Building
 
-    bash configure --with-toolchain-type=gcc --disable-warnings-as-errors \
-        --enable-unlimited-crypto --with-boot-jdk=<jdk25>
+    bash configure --with-toolchain-type=gcc --enable-unlimited-crypto \
+        --with-boot-jdk=<jdk25>
 
 A release build takes about 7.5 minutes with make -j96 on the T7.
 

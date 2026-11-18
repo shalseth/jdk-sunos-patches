@@ -1,0 +1,464 @@
+--- a/make/hotspot/lib/CompileJvm.gmk
++++ b/make/hotspot/lib/CompileJvm.gmk
+@@ -211,12 +211,16 @@
+     DISABLED_WARNINGS_gcc_macroAssembler_ppc_sha.cpp := unused-const-variable, \
+     DISABLED_WARNINGS_gcc_postaloc.cpp := address, \
+     DISABLED_WARNINGS_gcc_safepointMechanism.cpp := stringop-overflow, \
++    DISABLED_WARNINGS_gcc_sharedRuntime_sparc.cpp := nonnull, \
+     DISABLED_WARNINGS_gcc_shenandoahGenerationalHeap.cpp := stringop-overflow, \
+     DISABLED_WARNINGS_gcc_shenandoahHeap.cpp := stringop-overflow, \
+     DISABLED_WARNINGS_gcc_shenandoahLock.cpp := stringop-overflow, \
+     DISABLED_WARNINGS_gcc_stubGenerator_s390.cpp := unused-const-variable, \
++    DISABLED_WARNINGS_gcc_stubGenerator_sparc.cpp := nonnull, \
+     DISABLED_WARNINGS_gcc_synchronizer.cpp := stringop-overflow, \
++    DISABLED_WARNINGS_gcc_templateInterpreterGenerator_sparc.cpp := nonnull, \
+     DISABLED_WARNINGS_gcc_templateInterpreterGenerator_x86.cpp := unused-const-variable, \
++    DISABLED_WARNINGS_gcc_templateTable_sparc.cpp := nonnull, \
+     DISABLED_WARNINGS_gcc_xGlobals_ppc.cpp := unused-const-variable, \
+     DISABLED_WARNINGS_clang := $(DISABLED_WARNINGS_clang), \
+     DISABLED_WARNINGS_clang_arguments.cpp := missing-field-initializers, \
+--- a/src/hotspot/cpu/sparc/assembler_sparc.hpp
++++ b/src/hotspot/cpu/sparc/assembler_sparc.hpp
+@@ -65,7 +65,7 @@
+ 
+   bool     uses(Register reg) const { return base() == reg || (has_index() && index() == reg); }
+ 
+-  const relocInfo::relocType rtype() { return _rspec.type(); }
++  relocInfo::relocType       rtype() { return _rspec.type(); }
+   const RelocationHolder&    rspec() { return _rspec; }
+ 
+   RelocationHolder rspec(int offset) const {
+@@ -202,7 +202,7 @@
+   intptr_t value() const { return (intptr_t) _address; }
+   int      low10() const;
+ 
+-  const relocInfo::relocType rtype() const { return _rspec.type(); }
++  relocInfo::relocType       rtype() const { return _rspec.type(); }
+   const RelocationHolder&    rspec() const { return _rspec; }
+ 
+   RelocationHolder rspec(int offset) const {
+@@ -589,7 +589,7 @@
+   // and be sign-extended. Check the range.
+ 
+   static void assert_signed_range(intptr_t x, int nbits) {
+-    assert(nbits == 32 || (-(1 << nbits-1) <= x && x < (1 << nbits-1)),
++    assert(nbits == 32 || (-(1 << (nbits-1)) <= x && x < (1 << (nbits-1))),
+            "value out of range: x=" INTPTR_FORMAT ", nbits=%d", x, nbits);
+   }
+ 
+@@ -605,7 +605,7 @@
+   // fields: note bits numbered from LSB = 0, fields known by inclusive bit range
+ 
+   static int fmask(juint hi_bit, juint lo_bit) {
+-    assert(hi_bit >= lo_bit && 0 <= lo_bit && hi_bit < 32, "bad bits");
++    assert(hi_bit >= lo_bit && hi_bit < 32, "bad bits");
+     return (1 << (hi_bit-lo_bit + 1)) - 1;
+   }
+ 
+@@ -770,7 +770,7 @@
+   static int wdisp16(intptr_t x, intptr_t off) {
+     intptr_t xx = x - off;
+     assert_signed_word_disp_range(xx, 16);
+-    int r = (xx >> 2) & ((1 << 14) - 1) | (((xx >> (2+14)) & 3) << 20);
++    int r = ((xx >> 2) & ((1 << 14) - 1)) | (((xx >> (2+14)) & 3) << 20);
+     assert(inv_wdisp16(r, off) == x, "inverse is not inverse");
+     return r;
+   }
+--- a/src/hotspot/cpu/sparc/c1_LIRAssembler_sparc.cpp
++++ b/src/hotspot/cpu/sparc/c1_LIRAssembler_sparc.cpp
+@@ -3299,6 +3299,8 @@
+         }
+         break;
+       }
++      default:
++        break;
+     }
+   }
+ }
+--- a/src/hotspot/cpu/sparc/c1_LIRGenerator_sparc.cpp
++++ b/src/hotspot/cpu/sparc/c1_LIRGenerator_sparc.cpp
+@@ -505,6 +505,7 @@
+     case doubleTag:  do_ArithmeticOp_FPU(x);  return;
+     case longTag:    do_ArithmeticOp_Long(x); return;
+     case intTag:     do_ArithmeticOp_Int(x);  return;
++    default:         break;
+   }
+   ShouldNotReachHere();
+ }
+@@ -625,6 +626,8 @@
+         __ abs(value.result(), dst, LIR_OprFact::illegalOpr);
+         break;
+       }
++      default:
++        ShouldNotReachHere();
+       }
+       break;
+     }
+@@ -671,6 +674,8 @@
+       set_result(x, result);
+       break;
+     }
++    default:
++      break;
+   }
+ }
+ 
+--- a/src/hotspot/cpu/sparc/frame_sparc.cpp
++++ b/src/hotspot/cpu/sparc/frame_sparc.cpp
+@@ -359,7 +359,7 @@
+   _oop_map = nullptr;
+   _on_heap = false;
+   DEBUG_ONLY(_frame_index = -1;)
+-  assert(pc == nullptr && cb == nullptr || pc != nullptr, "can't have a cb and no pc!");
++  assert((pc == nullptr && cb == nullptr) || pc != nullptr, "can't have a cb and no pc!");
+   if (_cb == nullptr && _pc != nullptr ) {
+     _cb = CodeCache::find_blob(_pc);
+   }
+--- a/src/hotspot/cpu/sparc/frame_sparc.inline.hpp
++++ b/src/hotspot/cpu/sparc/frame_sparc.inline.hpp
+@@ -107,7 +107,7 @@
+   bool ret =  sp() == other.sp()
+            && fp() == other.fp()
+            && pc() == other.pc();
+-  assert(!ret || ret && cb() == other.cb() && _deopt_state == other._deopt_state, "inconsistent construction");
++  assert(!ret || (ret && cb() == other.cb() && _deopt_state == other._deopt_state), "inconsistent construction");
+   return ret;
+ }
+ 
+--- a/src/hotspot/cpu/sparc/globalDefinitions_sparc.hpp
++++ b/src/hotspot/cpu/sparc/globalDefinitions_sparc.hpp
+@@ -47,14 +47,12 @@
+ #if COMPILER1_AND_COMPILER2
+   // tiered, 64-bit, large machine
+   #define DEFAULT_CACHE_LINE_SIZE 128
+-  #define OM_CACHE_LINE_SIZE 64
+ #elif defined(COMPILER1)
+   // pure C1, 32-bit, small machine
+   #define DEFAULT_CACHE_LINE_SIZE 16
+ #elif defined(COMPILER2)
+   // pure C2, 64-bit, large machine
+   #define DEFAULT_CACHE_LINE_SIZE 128
+-  #define OM_CACHE_LINE_SIZE 64
+ #endif
+ 
+ // The default padding size for data structures to avoid false sharing.
+--- a/src/hotspot/cpu/sparc/macroAssembler_sparc.cpp
++++ b/src/hotspot/cpu/sparc/macroAssembler_sparc.cpp
+@@ -141,7 +141,7 @@
+       default: ShouldNotReachHere();
+     }
+   }
+-  return  inst & ~m  |  v;
++  return (inst & ~m) | v;
+ }
+ 
+ // Return the offset of the branch destination of instruction inst
+@@ -1082,8 +1082,8 @@
+     int last = j;
+     for ( ;  last+1 < 32;  ++last ) {
+       char b1[1024], b2[1024];
+-      sprintf(b1, "%f", val);
+-      sprintf(b2, "%f", f[last+1]);
++      os::snprintf_checked(b1, sizeof(b1), "%f", val);
++      os::snprintf_checked(b2, sizeof(b2), "%f", f[last+1]);
+       if (strcmp(b1, b2))
+         break;
+     }
+@@ -1102,8 +1102,8 @@
+     int last = j;
+     for ( ;  last+1 < 32;  ++last ) {
+       char b1[1024], b2[1024];
+-      sprintf(b1, "%f", val);
+-      sprintf(b2, "%f", d[last+1]);
++      os::snprintf_checked(b1, sizeof(b1), "%f", val);
++      os::snprintf_checked(b2, sizeof(b2), "%f", d[last+1]);
+       if (strcmp(b1, b2))
+         break;
+     }
+@@ -1120,7 +1120,7 @@
+ }
+ 
+ void RegistersForDebugging::save_registers(MacroAssembler* a) {
+-  a->sub(FP, align_up(sizeof(RegistersForDebugging), sizeof(jdouble)) - STACK_BIAS, O0);
++  a->sub(FP, (int)align_up(sizeof(RegistersForDebugging), sizeof(jdouble)) - STACK_BIAS, O0);
+   a->flushw();
+   int i;
+   for (i = 0; i < 8; ++i) {
+@@ -1512,6 +1512,7 @@
+     case Assembler::notEqual:     return Assembler::rc_nz;
+     case Assembler::greater:      return Assembler::rc_gz;
+     case Assembler::greaterEqual: return Assembler::rc_gez;
++    default:                      break;
+   }
+   ShouldNotReachHere();
+   return Assembler::rc_z;
+@@ -3097,7 +3098,7 @@
+   // was post-decremented.)  Skip this address by starting at i=1, and
+   // touch a few more pages below.  N.B.  It is important to touch all
+   // the way down to and including i=StackShadowPages.
+-  for (int i = 1; i < StackOverflow::stack_shadow_zone_size() / os::vm_page_size(); i++) {
++  for (int i = 1; i < (int)(StackOverflow::stack_shadow_zone_size() / os::vm_page_size()); i++) {
+     set((-i*offset)+STACK_BIAS, Rscratch);
+     st(G0, Rtsp, Rscratch);
+   }
+--- a/src/hotspot/cpu/sparc/macroAssembler_sparc.hpp
++++ b/src/hotspot/cpu/sparc/macroAssembler_sparc.hpp
+@@ -584,7 +584,6 @@
+   inline void lduw(const Address& a, Register d, int offset = 0);
+   inline void ldx( const Address& a, Register d, int offset = 0);
+   inline void ld(  const Address& a, Register d, int offset = 0);
+-  inline void ldd( const Address& a, Register d, int offset = 0);
+ 
+   inline void ldub(Register s1, RegisterOrConstant s2, Register d );
+   inline void ldsb(Register s1, RegisterOrConstant s2, Register d );
+@@ -594,7 +593,6 @@
+   inline void ldsw(Register s1, RegisterOrConstant s2, Register d );
+   inline void ldx( Register s1, RegisterOrConstant s2, Register d );
+   inline void ld(  Register s1, RegisterOrConstant s2, Register d );
+-  inline void ldd( Register s1, RegisterOrConstant s2, Register d );
+ 
+   using Assembler::ldf;
+   inline void ldf(FloatRegisterImpl::Width w, Register s1, RegisterOrConstant s2, FloatRegister d);
+@@ -640,13 +638,11 @@
+   inline void stw(Register d, const Address& a, int offset = 0 );
+   inline void stx(Register d, const Address& a, int offset = 0 );
+   inline void st( Register d, const Address& a, int offset = 0 );
+-  inline void std(Register d, const Address& a, int offset = 0 );
+ 
+   inline void stb(Register d, Register s1, RegisterOrConstant s2 );
+   inline void sth(Register d, Register s1, RegisterOrConstant s2 );
+   inline void stw(Register d, Register s1, RegisterOrConstant s2 );
+   inline void stx(Register d, Register s1, RegisterOrConstant s2 );
+-  inline void std(Register d, Register s1, RegisterOrConstant s2 );
+   inline void st( Register d, Register s1, RegisterOrConstant s2 );
+ 
+   using Assembler::stf;
+--- a/src/hotspot/cpu/sparc/macroAssembler_sparc.inline.hpp
++++ b/src/hotspot/cpu/sparc/macroAssembler_sparc.inline.hpp
+@@ -556,10 +556,6 @@
+   if (a.has_index()) { assert(offset == 0, ""); lduw(a.base(), a.index(),         d); }
+   else               {                          lduw(a.base(), a.disp() + offset, d); }
+ }
+-inline void MacroAssembler::ldd( const Address& a, Register d, int offset) {
+-  if (a.has_index()) { assert(offset == 0, ""); ldd( a.base(), a.index(),         d); }
+-  else               {                          ldd( a.base(), a.disp() + offset, d); }
+-}
+ inline void MacroAssembler::ldx( const Address& a, Register d, int offset) {
+   if (a.has_index()) { assert(offset == 0, ""); ldx( a.base(), a.index(),         d); }
+   else               {                          ldx( a.base(), a.disp() + offset, d); }
+@@ -573,7 +569,6 @@
+ inline void MacroAssembler::ldsw(Register s1, RegisterOrConstant s2, Register d) { ldsw(Address(s1, s2), d); }
+ inline void MacroAssembler::ldx( Register s1, RegisterOrConstant s2, Register d) { ldx( Address(s1, s2), d); }
+ inline void MacroAssembler::ld(  Register s1, RegisterOrConstant s2, Register d) { ld(  Address(s1, s2), d); }
+-inline void MacroAssembler::ldd( Register s1, RegisterOrConstant s2, Register d) { ldd( Address(s1, s2), d); }
+ 
+ inline void MacroAssembler::ldf(FloatRegisterImpl::Width w, Register s1, RegisterOrConstant s2, FloatRegister d) {
+   if (s2.is_register())  ldf(w, s1, s2.as_register(), d);
+@@ -662,10 +657,6 @@
+   if (a.has_index()) { assert(offset == 0, ""); stw(d, a.base(), a.index()        ); }
+   else               {                          stw(d, a.base(), a.disp() + offset); }
+ }
+-inline void MacroAssembler::std(Register d, const Address& a, int offset) {
+-  if (a.has_index()) { assert(offset == 0, ""); std(d, a.base(), a.index()        ); }
+-  else               {                          std(d, a.base(), a.disp() + offset); }
+-}
+ inline void MacroAssembler::stx(Register d, const Address& a, int offset) {
+   if (a.has_index()) { assert(offset == 0, ""); stx(d, a.base(), a.index()        ); }
+   else               {                          stx(d, a.base(), a.disp() + offset); }
+@@ -675,7 +666,6 @@
+ inline void MacroAssembler::sth(Register d, Register s1, RegisterOrConstant s2) { sth(d, Address(s1, s2)); }
+ inline void MacroAssembler::stw(Register d, Register s1, RegisterOrConstant s2) { stw(d, Address(s1, s2)); }
+ inline void MacroAssembler::stx(Register d, Register s1, RegisterOrConstant s2) { stx(d, Address(s1, s2)); }
+-inline void MacroAssembler::std(Register d, Register s1, RegisterOrConstant s2) { std(d, Address(s1, s2)); }
+ inline void MacroAssembler::st( Register d, Register s1, RegisterOrConstant s2) { st( d, Address(s1, s2)); }
+ 
+ inline void MacroAssembler::stf(FloatRegisterImpl::Width w, FloatRegister d, Register s1, RegisterOrConstant s2) {
+--- a/src/hotspot/cpu/sparc/matcher_sparc.hpp
++++ b/src/hotspot/cpu/sparc/matcher_sparc.hpp
+@@ -34,7 +34,7 @@
+   // Whether this platform implements the scalable vector feature
+   static const bool implements_scalable_vector = false;
+ 
+-  static constexpr const bool supports_scalable_vector() {
++  static constexpr bool supports_scalable_vector() {
+     return false;
+   }
+ 
+@@ -66,10 +66,10 @@
+   }
+ 
+   // No additional cost for CMOVL.
+-  static const int long_cmove_cost() { return 0; }
++  static int long_cmove_cost() { return 0; }
+ 
+   // CMOVF/CMOVD are expensive on e.g., T4 and SPARC64.
+-  static const int float_cmove_cost() {
++  static int float_cmove_cost() {
+     return VM_Version::has_fast_cmove() ? 0 : ConditionalMoveLimit;
+   }
+ 
+--- a/src/hotspot/cpu/sparc/nativeInst_sparc.cpp
++++ b/src/hotspot/cpu/sparc/nativeInst_sparc.cpp
+@@ -506,7 +506,7 @@
+         oop_Relocation *r = iter.oop_reloc();
+         if (oop_addr == nullptr) {
+           oop_addr = r->oop_addr();
+-          *oop_addr = cast_to_oop(x);
++          *oop_addr = cast_to_oop((intptr_t)x);
+         } else {
+           assert(oop_addr == r->oop_addr(), "must be only one set-oop here");
+         }
+@@ -515,7 +515,7 @@
+         metadata_Relocation *r = iter.metadata_reloc();
+         if (metadata_addr == nullptr) {
+           metadata_addr = r->metadata_addr();
+-          *metadata_addr = (Metadata*)x;
++          *metadata_addr = (Metadata*)(intptr_t)x;
+         } else {
+           assert(metadata_addr == r->metadata_addr(), "must be only one set-metadata here");
+         }
+@@ -656,9 +656,6 @@
+   a->ldx( G5, al1.low10(), G4 ); idx++;
+   a->sethi(al2, I3); a->add(I3, al2.low10(), I3);
+   a->ldx( G5, I3, G4 ); idx++;
+-  a->ldd( G5, al1.low10(), G4 ); idx++;
+-  a->sethi(al2, I3); a->add(I3, al2.low10(), I3);
+-  a->ldd( G5, I3, G4 ); idx++;
+   a->ldf( FloatRegisterImpl::D, O2, -1, F14 ); idx++;
+   a->sethi(al2, I3); a->add(I3, al2.low10(), I3);
+   a->ldf( FloatRegisterImpl::S, O0, I3, F15 ); idx++;
+@@ -675,9 +672,6 @@
+   a->stx( G5, G4, al1.low10() ); idx++;
+   a->sethi(al2, I3); a->add(I3, al2.low10(), I3);
+   a->stx( G5, G4, I3 ); idx++;
+-  a->std( G5, G4, al1.low10() ); idx++;
+-  a->sethi(al2, I3); a->add(I3, al2.low10(), I3);
+-  a->std( G5, G4, I3 ); idx++;
+   a->stf( FloatRegisterImpl::S, F18, O2, -1 ); idx++;
+   a->sethi(al2, I3); a->add(I3, al2.low10(), I3);
+   a->stf( FloatRegisterImpl::S, F15, O0, I3 ); idx++;
+--- a/src/hotspot/cpu/sparc/nativeInst_sparc.hpp
++++ b/src/hotspot/cpu/sparc/nativeInst_sparc.hpp
+@@ -180,7 +180,7 @@
+   static bool fits_in_simm(int x, int nbits) {
+     // cf. Assembler::assert_signed_range()
+     // return -(1 << nbits-1) <= x  &&  x < ( 1 << nbits-1),
+-    return (unsigned)(x + (1 << nbits-1)) < (unsigned)(1 << nbits);
++    return (unsigned)(x + (1 << (nbits-1))) < (unsigned)(1 << nbits);
+   }
+ 
+   // set a signed immediate field
+--- a/src/hotspot/cpu/sparc/register_sparc.hpp
++++ b/src/hotspot/cpu/sparc/register_sparc.hpp
+@@ -88,12 +88,12 @@
+ 
+   Register after_save() const {
+     assert(is_out() || is_global(), "register not visible after save");
+-    return is_out() ? as_Register(encoding() + (ibase - obase)) : (const Register)this;
++    return is_out() ? as_Register(encoding() + (ibase - obase)) : (Register)this;
+   }
+ 
+   Register after_restore() const {
+     assert(is_in() || is_global(), "register not visible after restore");
+-    return is_in() ? as_Register(encoding() + (obase - ibase)) : (const Register)this;
++    return is_in() ? as_Register(encoding() + (obase - ibase)) : (Register)this;
+   }
+ 
+   int sp_offset_in_saved_window() const {
+--- a/src/hotspot/cpu/sparc/sharedRuntime_sparc.cpp
++++ b/src/hotspot/cpu/sparc/sharedRuntime_sparc.cpp
+@@ -233,16 +233,6 @@
+   return (r->reg2stack() + SharedRuntime::out_preserve_stack_slots()) * VMRegImpl::stack_slot_size;
+ }
+ 
+-static VMRegPair reg64_to_VMRegPair(Register r) {
+-  VMRegPair ret;
+-  if (wordSize == 8) {
+-    ret.set2(r->as_VMReg());
+-  } else {
+-    ret.set_pair(r->successor()->as_VMReg(), r->as_VMReg());
+-  }
+-  return ret;
+-}
+-
+ // ---------------------------------------------------------------------------
+ // Read the array of BasicTypes from a signature, and compute where the
+ // arguments should go.  Values in the VMRegPair regs array refer to 4-byte (VMRegImpl::stack_slot_size)
+@@ -1073,6 +1063,8 @@
+   case T_DOUBLE:
+     __ stf(FloatRegisterImpl::D, F0, SP, frame_slots*VMRegImpl::stack_slot_size - 8+STACK_BIAS);
+     break;
++  default:
++    break;
+   }
+ }
+ 
+@@ -1084,6 +1076,8 @@
+   case T_DOUBLE:
+     __ ldf(FloatRegisterImpl::D, SP, frame_slots*VMRegImpl::stack_slot_size - 8+STACK_BIAS, F0);
+     break;
++  default:
++    break;
+   }
+ }
+ 
+--- a/src/hotspot/cpu/sparc/sparc.ad
++++ b/src/hotspot/cpu/sparc/sparc.ad
+@@ -646,7 +646,7 @@
+   if (addr->is_Mach() && addr->as_Mach()->ideal_Opcode() == Op_AddP) {
+     Node* a = addr->in(2/*AddPNode::Address*/);
+     Node* o = addr->in(3/*AddPNode::Offset*/);
+-    offset = o->is_Con() ? o->bottom_type()->is_intptr_t()->get_con() : Type::OffsetBot;
++    offset = o->is_Con() ? o->bottom_type()->is_intptr_t()->get_con() : (intptr_t)Type::OffsetBot;
+     atype = a->bottom_type()->is_ptr()->add_offset(offset);
+     assert(atype->isa_oop_ptr(), "still an oop");
+   }
+--- a/src/hotspot/cpu/sparc/stubGenerator_sparc.cpp
++++ b/src/hotspot/cpu/sparc/stubGenerator_sparc.cpp
+@@ -64,8 +64,6 @@
+ // Note:  The register L7 is used as L7_thread_cache, and may not be used
+ //        any other way within this module.
+ 
+-static const Register& Lstub_temp = L2;
+-
+ // -------------------------------------------------------------------------------------------------------------------------
+ // Stub Code definitions
+ 
+@@ -595,7 +593,7 @@
+     address start = __ pc();
+     __ BIND(_atomic_add_stub);
+ 
+-    Label(retry);
++    Label retry;
+     __ BIND(retry);
+ 
+     __ lduw(O1, 0, O2);
+--- a/src/hotspot/cpu/sparc/templateTable_sparc.cpp
++++ b/src/hotspot/cpu/sparc/templateTable_sparc.cpp
+@@ -2569,6 +2569,7 @@
+     case Bytecodes::_fast_fputfield: __ push_f(Ftos_f); break;
+     // get words in right order for use as jvalue object
+     case Bytecodes::_fast_lputfield: __ push_l(Otos_l); break;
++    default:                         break;
+     }
+     // setup pointer to jvalue object
+     __ mov(Lesp, G3_scratch);  __ inc(G3_scratch, wordSize);
+@@ -2586,6 +2587,7 @@
+     case Bytecodes::_fast_dputfield: __ pop_d(Ftos_d); break;
+     case Bytecodes::_fast_fputfield: __ pop_f(Ftos_f); break;
+     case Bytecodes::_fast_lputfield: __ pop_l(Otos_l); break;
++    default:                         break;
+     }
+     __ bind(done);
+   }
+--- a/src/hotspot/cpu/sparc/vm_version_sparc.hpp
++++ b/src/hotspot/cpu/sparc/vm_version_sparc.hpp
+@@ -206,7 +206,7 @@
+         ISA_sha512_msk | ISA_mpmul_msk | ISA_mont_msk | ISA_pause_msk |
+         ISA_cbcond_msk | ISA_crc32c_msk,
+ 
+-    core_C4_msk  = core_C3_msk - ISA_kasumi_msk |
++    core_C4_msk  = (core_C3_msk - ISA_kasumi_msk) |
+         ISA_vis3b_msk | ISA_adi_msk | ISA_sparc5_msk | ISA_mwait_msk |
+         ISA_xmpmul_msk | ISA_xmont_msk | ISA_pause_nsec_msk | ISA_vamask_msk,
+ 

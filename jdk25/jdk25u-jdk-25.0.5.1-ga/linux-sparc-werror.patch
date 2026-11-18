@@ -1,0 +1,46 @@
+--- a/src/hotspot/os_cpu/linux_sparc/vm_version_linux_sparc.cpp
++++ b/src/hotspot/os_cpu/linux_sparc/vm_version_linux_sparc.cpp
+@@ -47,7 +47,7 @@
+         if (vstr != nullptr) {
+           // We have a matching line and a valid starting point to the value of
+           // the field, copy the string for keeps.
+-          _string = strdup(vstr);
++          _string = os::strdup(vstr);
+           // fgets() keeps the newline, which match() must not see
+           ((char*)_string)[strcspn(_string, "\n")] = '\0';
+           break;
+@@ -57,7 +57,7 @@
+     }
+   }
+ 
+-  ~CPUinfo() { free((void*)_string); }
++  ~CPUinfo() { os::free((void*)_string); }
+ 
+   const char* value() const { return _string; }
+ 
+@@ -222,7 +222,9 @@
+ 
+ ////////////////////////////////////////////////////////////////////////////////
+ 
++#ifdef ASSERT
+ static uint32_t uhash32(const char name[]);
++#endif
+ 
+ static void update_table(FeatureEntry feature_tbl[], uint32_t hv,
+                          const char* ch1p,
+@@ -298,6 +300,7 @@
+   return mask;
+ }
+ 
++#ifdef ASSERT
+ static uint32_t uhash32(const char name[]) {
+   uint32_t hv = 0;
+ 
+@@ -307,6 +310,7 @@
+ 
+   return hv;
+ }
++#endif
+ 
+ static bool verify_match(const char name[], const char* ch1p, const char* endp);
+ 
