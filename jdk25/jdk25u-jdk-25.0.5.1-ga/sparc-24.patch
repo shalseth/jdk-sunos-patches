@@ -1,0 +1,1946 @@
+diff --git a/src/hotspot/cpu/sparc/c1_CodeStubs_sparc.cpp b/src/hotspot/cpu/sparc/c1_CodeStubs_sparc.cpp
+index 359084e..b185f53 100644
+--- a/src/hotspot/cpu/sparc/c1_CodeStubs_sparc.cpp
++++ b/src/hotspot/cpu/sparc/c1_CodeStubs_sparc.cpp
+@@ -44,7 +44,7 @@ void RangeCheckStub::emit_code(LIR_Assembler* ce) {
+   __ bind(_entry);
+ 
+   if (_info->deoptimize_on_exception()) {
+-    address a = Runtime1::entry_for(Runtime1::predicate_failed_trap_id);
++    address a = Runtime1::entry_for(C1StubId::predicate_failed_trap_id);
+     __ call(a, relocInfo::runtime_call_type);
+     __ delayed()->nop();
+     ce->add_call_info_here(_info);
+@@ -59,10 +59,10 @@ void RangeCheckStub::emit_code(LIR_Assembler* ce) {
+     __ set(_index->as_jint(), G4);
+   }
+   if (_throw_index_out_of_bounds_exception) {
+-    __ call(Runtime1::entry_for(Runtime1::throw_index_exception_id), relocInfo::runtime_call_type);
++    __ call(Runtime1::entry_for(C1StubId::throw_index_exception_id), relocInfo::runtime_call_type);
+   } else {
+     __ mov(_array->as_pointer_register(), G5);
+-    __ call(Runtime1::entry_for(Runtime1::throw_range_check_failed_id), relocInfo::runtime_call_type);
++    __ call(Runtime1::entry_for(C1StubId::throw_range_check_failed_id), relocInfo::runtime_call_type);
+   }
+   __ delayed()->nop();
+   ce->add_call_info_here(_info);
+@@ -76,7 +76,7 @@ PredicateFailedStub::PredicateFailedStub(CodeEmitInfo* info) {
+ 
+ void PredicateFailedStub::emit_code(LIR_Assembler* ce) {
+   __ bind(_entry);
+-  address a = Runtime1::entry_for(Runtime1::predicate_failed_trap_id);
++  address a = Runtime1::entry_for(C1StubId::predicate_failed_trap_id);
+   __ call(a, relocInfo::runtime_call_type);
+   __ delayed()->nop();
+   ce->add_call_info_here(_info);
+@@ -89,7 +89,7 @@ void CounterOverflowStub::emit_code(LIR_Assembler* ce) {
+   __ set(_bci, G4);
+   Metadata *m = _method->as_constant_ptr()->as_metadata();
+   __ set_metadata_constant(m, G5);
+-  __ call(Runtime1::entry_for(Runtime1::counter_overflow_id), relocInfo::runtime_call_type);
++  __ call(Runtime1::entry_for(C1StubId::counter_overflow_id), relocInfo::runtime_call_type);
+   __ delayed()->nop();
+   ce->add_call_info_here(_info);
+   ce->verify_oop_map(_info);
+@@ -104,7 +104,7 @@ void DivByZeroStub::emit_code(LIR_Assembler* ce) {
+     ce->compilation()->implicit_exception_table()->append(_offset, __ offset());
+   }
+   __ bind(_entry);
+-  __ call(Runtime1::entry_for(Runtime1::throw_div0_exception_id), relocInfo::runtime_call_type);
++  __ call(Runtime1::entry_for(C1StubId::throw_div0_exception_id), relocInfo::runtime_call_type);
+   __ delayed()->nop();
+   ce->add_call_info_here(_info);
+   ce->verify_oop_map(_info);
+@@ -118,9 +118,9 @@ void ImplicitNullCheckStub::emit_code(LIR_Assembler* ce) {
+   address a;
+   if (_info->deoptimize_on_exception()) {
+     // Deoptimize, do not throw the exception, because it is probably wrong to do it here.
+-    a = Runtime1::entry_for(Runtime1::predicate_failed_trap_id);
++    a = Runtime1::entry_for(C1StubId::predicate_failed_trap_id);
+   } else {
+-    a = Runtime1::entry_for(Runtime1::throw_null_pointer_exception_id);
++    a = Runtime1::entry_for(C1StubId::throw_null_pointer_exception_id);
+   }
+ 
+   ce->compilation()->implicit_exception_table()->append(_offset, __ offset());
+@@ -155,14 +155,14 @@ void SimpleExceptionStub::emit_code(LIR_Assembler* ce) {
+ 
+ // Implementation of NewInstanceStub
+ 
+-NewInstanceStub::NewInstanceStub(LIR_Opr klass_reg, LIR_Opr result, ciInstanceKlass* klass, CodeEmitInfo* info, Runtime1::StubID stub_id) {
++NewInstanceStub::NewInstanceStub(LIR_Opr klass_reg, LIR_Opr result, ciInstanceKlass* klass, CodeEmitInfo* info, C1StubId stub_id) {
+   _result = result;
+   _klass = klass;
+   _klass_reg = klass_reg;
+   _info = new CodeEmitInfo(info);
+-  assert(stub_id == Runtime1::new_instance_id                 ||
+-         stub_id == Runtime1::fast_new_instance_id            ||
+-         stub_id == Runtime1::fast_new_instance_init_check_id,
++  assert(stub_id == C1StubId::new_instance_id                 ||
++         stub_id == C1StubId::fast_new_instance_id            ||
++         stub_id == C1StubId::fast_new_instance_init_check_id,
+          "need new_instance id");
+   _stub_id   = stub_id;
+ }
+@@ -192,7 +192,7 @@ void NewTypeArrayStub::emit_code(LIR_Assembler* ce) {
+   __ bind(_entry);
+ 
+   __ mov(_length->as_register(), G4);
+-  __ call(Runtime1::entry_for(Runtime1::new_type_array_id), relocInfo::runtime_call_type);
++  __ call(Runtime1::entry_for(C1StubId::new_type_array_id), relocInfo::runtime_call_type);
+   __ delayed()->mov_or_nop(_klass_reg->as_register(), G5);
+   ce->add_call_info_here(_info);
+   ce->verify_oop_map(_info);
+@@ -215,7 +215,7 @@ void NewObjectArrayStub::emit_code(LIR_Assembler* ce) {
+   __ bind(_entry);
+ 
+   __ mov(_length->as_register(), G4);
+-  __ call(Runtime1::entry_for(Runtime1::new_object_array_id), relocInfo::runtime_call_type);
++  __ call(Runtime1::entry_for(C1StubId::new_object_array_id), relocInfo::runtime_call_type);
+   __ delayed()->mov_or_nop(_klass_reg->as_register(), G5);
+   ce->add_call_info_here(_info);
+   ce->verify_oop_map(_info);
+@@ -229,9 +229,9 @@ void MonitorEnterStub::emit_code(LIR_Assembler* ce) {
+   __ bind(_entry);
+   __ mov(_obj_reg->as_register(), G4);
+   if (ce->compilation()->has_fpu_code()) {
+-    __ call(Runtime1::entry_for(Runtime1::monitorenter_id), relocInfo::runtime_call_type);
++    __ call(Runtime1::entry_for(C1StubId::monitorenter_id), relocInfo::runtime_call_type);
+   } else {
+-    __ call(Runtime1::entry_for(Runtime1::monitorenter_nofpu_id), relocInfo::runtime_call_type);
++    __ call(Runtime1::entry_for(C1StubId::monitorenter_nofpu_id), relocInfo::runtime_call_type);
+   }
+   __ delayed()->mov_or_nop(_lock_reg->as_register(), G5);
+   ce->add_call_info_here(_info);
+@@ -247,9 +247,9 @@ void MonitorExitStub::emit_code(LIR_Assembler* ce) {
+     ce->monitor_address(_monitor_ix, _lock_reg);
+   }
+   if (ce->compilation()->has_fpu_code()) {
+-    __ call(Runtime1::entry_for(Runtime1::monitorexit_id), relocInfo::runtime_call_type);
++    __ call(Runtime1::entry_for(C1StubId::monitorexit_id), relocInfo::runtime_call_type);
+   } else {
+-    __ call(Runtime1::entry_for(Runtime1::monitorexit_nofpu_id), relocInfo::runtime_call_type);
++    __ call(Runtime1::entry_for(C1StubId::monitorexit_nofpu_id), relocInfo::runtime_call_type);
+   }
+ 
+   __ delayed()->mov_or_nop(_lock_reg->as_register(), G4);
+@@ -370,10 +370,10 @@ void PatchingStub::emit_code(LIR_Assembler* ce) {
+   address target = NULL;
+   relocInfo::relocType reloc_type = relocInfo::none;
+   switch (_id) {
+-    case access_field_id:  target = Runtime1::entry_for(Runtime1::access_field_patching_id); break;
+-    case load_klass_id:    target = Runtime1::entry_for(Runtime1::load_klass_patching_id); reloc_type = relocInfo::metadata_type; break;
+-    case load_mirror_id:   target = Runtime1::entry_for(Runtime1::load_mirror_patching_id); reloc_type = relocInfo::oop_type; break;
+-    case load_appendix_id: target = Runtime1::entry_for(Runtime1::load_appendix_patching_id); reloc_type = relocInfo::oop_type; break;
++    case access_field_id:  target = Runtime1::entry_for(C1StubId::access_field_patching_id); break;
++    case load_klass_id:    target = Runtime1::entry_for(C1StubId::load_klass_patching_id); reloc_type = relocInfo::metadata_type; break;
++    case load_mirror_id:   target = Runtime1::entry_for(C1StubId::load_mirror_patching_id); reloc_type = relocInfo::oop_type; break;
++    case load_appendix_id: target = Runtime1::entry_for(C1StubId::load_appendix_patching_id); reloc_type = relocInfo::oop_type; break;
+     default: ShouldNotReachHere();
+   }
+   __ bind(call_patch);
+@@ -404,7 +404,7 @@ void PatchingStub::emit_code(LIR_Assembler* ce) {
+ void DeoptimizeStub::emit_code(LIR_Assembler* ce) {
+   __ bind(_entry);
+   __ set(_trap_request, G4);
+-  __ call(Runtime1::entry_for(Runtime1::deoptimize_id), relocInfo::runtime_call_type);
++  __ call(Runtime1::entry_for(C1StubId::deoptimize_id), relocInfo::runtime_call_type);
+   __ delayed()->nop();
+   ce->add_call_info_here(_info);
+   DEBUG_ONLY(__ should_not_reach_here());
+diff --git a/src/hotspot/cpu/sparc/c1_LIRAssembler_sparc.cpp b/src/hotspot/cpu/sparc/c1_LIRAssembler_sparc.cpp
+index c220d0a..7fdda39 100644
+--- a/src/hotspot/cpu/sparc/c1_LIRAssembler_sparc.cpp
++++ b/src/hotspot/cpu/sparc/c1_LIRAssembler_sparc.cpp
+@@ -304,7 +304,7 @@ int LIR_Assembler::emit_exception_handler() {
+ 
+   int offset = code_offset();
+ 
+-  __ call(Runtime1::entry_for(Runtime1::handle_exception_from_callee_id), relocInfo::runtime_call_type);
++  __ call(Runtime1::entry_for(C1StubId::handle_exception_from_callee_id), relocInfo::runtime_call_type);
+   __ delayed()->nop();
+   __ should_not_reach_here();
+   guarantee(code_offset() - offset <= exception_handler_size(), "overflow");
+@@ -360,7 +360,7 @@ int LIR_Assembler::emit_unwind_handler() {
+   }
+ 
+   // dispatch to the unwind logic
+-  __ call(Runtime1::entry_for(Runtime1::unwind_exception_id), relocInfo::runtime_call_type);
++  __ call(Runtime1::entry_for(C1StubId::unwind_exception_id), relocInfo::runtime_call_type);
+   __ delayed()->nop();
+ 
+   // Emit the slow path assembly
+@@ -412,7 +412,7 @@ void LIR_Assembler::jobject2reg(jobject o, Register reg) {
+ #endif
+     int oop_index = __ oop_recorder()->find_index(o);
+     RelocationHolder rspec = oop_Relocation::spec(oop_index);
+-    __ set(NULL_WORD, reg, rspec); // Will be set when the nmethod is created
++    __ set((address)nullptr, reg, rspec); // Will be set when the nmethod is created
+   }
+ }
+ 
+@@ -1812,7 +1812,7 @@ void LIR_Assembler::throw_op(LIR_Opr exceptionPC, LIR_Opr exceptionOop, CodeEmit
+   __ set(pc_for_athrow, Oissuing_pc, rspec);
+   add_call_info(pc_for_athrow_offset, info); // for exception handler
+ 
+-  __ call(Runtime1::entry_for(Runtime1::handle_exception_id), relocInfo::runtime_call_type);
++  __ call(Runtime1::entry_for(C1StubId::handle_exception_id), relocInfo::runtime_call_type);
+   __ delayed()->nop();
+ }
+ 
+@@ -1978,7 +1978,7 @@ void LIR_Assembler::emit_arraycopy(LIR_OpArrayCopy* op) {
+ 
+       __ check_klass_subtype_fast_path(G3, G1, tmp, tmp2, &cont, copyfunc_addr == NULL ? stub->entry() : &slow, NULL);
+ 
+-      __ call(Runtime1::entry_for(Runtime1::slow_subtype_check_id), relocInfo::runtime_call_type);
++      __ call(Runtime1::entry_for(C1StubId::slow_subtype_check_id), relocInfo::runtime_call_type);
+       __ delayed()->nop();
+ 
+       __ cmp(G3, 0);
+@@ -2424,7 +2424,7 @@ void LIR_Assembler::emit_typecheck_helper(LIR_OpTypeCheck *op, Label* success, L
+     if (need_slow_path) {
+       // call out-of-line instance of __ check_klass_subtype_slow_path(...):
+       assert(klass_RInfo == G3 && k_RInfo == G1, "incorrect call setup");
+-      __ call(Runtime1::entry_for(Runtime1::slow_subtype_check_id), relocInfo::runtime_call_type);
++      __ call(Runtime1::entry_for(C1StubId::slow_subtype_check_id), relocInfo::runtime_call_type);
+       __ delayed()->nop();
+       __ cmp(G3, 0);
+       __ br(Assembler::equal, false, Assembler::pn, *failure_target);
+@@ -2519,7 +2519,7 @@ void LIR_Assembler::emit_opTypeCheck(LIR_OpTypeCheck* op) {
+ 
+     // call out-of-line instance of __ check_klass_subtype_slow_path(...):
+     assert(klass_RInfo == G3 && k_RInfo == G1, "incorrect call setup");
+-    __ call(Runtime1::entry_for(Runtime1::slow_subtype_check_id), relocInfo::runtime_call_type);
++    __ call(Runtime1::entry_for(C1StubId::slow_subtype_check_id), relocInfo::runtime_call_type);
+     __ delayed()->nop();
+     __ cmp(G3, 0);
+     __ br(Assembler::equal, false, Assembler::pn, *failure_target);
+diff --git a/src/hotspot/cpu/sparc/c1_LIRGenerator_sparc.cpp b/src/hotspot/cpu/sparc/c1_LIRGenerator_sparc.cpp
+index 616ebca..d82cfd6 100644
+--- a/src/hotspot/cpu/sparc/c1_LIRGenerator_sparc.cpp
++++ b/src/hotspot/cpu/sparc/c1_LIRGenerator_sparc.cpp
+@@ -1115,7 +1115,7 @@ void LIRGenerator::do_NewMultiArray(NewMultiArray* x) {
+   args->append(rank);
+   args->append(varargs);
+   const LIR_Opr reg = result_register_for(x->type());
+-  __ call_runtime(Runtime1::entry_for(Runtime1::new_multi_array_id),
++  __ call_runtime(Runtime1::entry_for(C1StubId::new_multi_array_id),
+                   LIR_OprFact::illegalOpr,
+                   reg, args, info);
+ 
+@@ -1145,14 +1145,14 @@ void LIRGenerator::do_CheckCast(CheckCast* x) {
+ 
+   if (x->is_incompatible_class_change_check()) {
+     assert(patching_info == NULL, "can't patch this");
+-    stub = new SimpleExceptionStub(Runtime1::throw_incompatible_class_change_error_id, LIR_OprFact::illegalOpr, info_for_exception);
++    stub = new SimpleExceptionStub(C1StubId::throw_incompatible_class_change_error_id, LIR_OprFact::illegalOpr, info_for_exception);
+   } else if (x->is_invokespecial_receiver_check()) {
+     assert(patching_info == NULL, "can't patch this");
+     stub = new DeoptimizeStub(info_for_exception,
+                               Deoptimization::Reason_class_check,
+                               Deoptimization::Action_none);
+   } else {
+-    stub = new SimpleExceptionStub(Runtime1::throw_class_cast_exception_id, obj.result(), info_for_exception);
++    stub = new SimpleExceptionStub(C1StubId::throw_class_cast_exception_id, obj.result(), info_for_exception);
+   }
+   LIR_Opr tmp1 = FrameMap::G1_oop_opr;
+   LIR_Opr tmp2 = FrameMap::G3_oop_opr;
+diff --git a/src/hotspot/cpu/sparc/c1_MacroAssembler_sparc.cpp b/src/hotspot/cpu/sparc/c1_MacroAssembler_sparc.cpp
+index 0fe3442..e646569 100644
+--- a/src/hotspot/cpu/sparc/c1_MacroAssembler_sparc.cpp
++++ b/src/hotspot/cpu/sparc/c1_MacroAssembler_sparc.cpp
+@@ -255,7 +255,7 @@ void C1_MacroAssembler::initialize_object(
+ 
+   if (CURRENT_ENV->dtrace_alloc_probes()) {
+     assert(obj == O0, "must be");
+-    call(CAST_FROM_FN_PTR(address, Runtime1::entry_for(Runtime1::dtrace_object_alloc_id)),
++    call(CAST_FROM_FN_PTR(address, Runtime1::entry_for(C1StubId::dtrace_object_alloc_id)),
+          relocInfo::runtime_call_type);
+     delayed()->nop();
+   }
+@@ -329,7 +329,7 @@ void C1_MacroAssembler::allocate_array(
+ 
+   if (CURRENT_ENV->dtrace_alloc_probes()) {
+     assert(obj == O0, "must be");
+-    call(CAST_FROM_FN_PTR(address, Runtime1::entry_for(Runtime1::dtrace_object_alloc_id)),
++    call(CAST_FROM_FN_PTR(address, Runtime1::entry_for(C1StubId::dtrace_object_alloc_id)),
+          relocInfo::runtime_call_type);
+     delayed()->nop();
+   }
+diff --git a/src/hotspot/cpu/sparc/c1_Runtime1_sparc.cpp b/src/hotspot/cpu/sparc/c1_Runtime1_sparc.cpp
+index 8b64279..9445189 100644
+--- a/src/hotspot/cpu/sparc/c1_Runtime1_sparc.cpp
++++ b/src/hotspot/cpu/sparc/c1_Runtime1_sparc.cpp
+@@ -83,10 +83,10 @@ int StubAssembler::call_RT(Register oop_result1, Register metadata_result, addre
+       // we use O7 linkage so that forward_exception_entry has the issuing PC
+       call(StubRoutines::forward_exception_entry(), relocInfo::runtime_call_type);
+       delayed()->restore();
+-    } else if (_stub_id == Runtime1::forward_exception_id) {
++    } else if (_stub_id == (int)C1StubId::forward_exception_id) {
+       should_not_reach_here();
+     } else {
+-      AddressLiteral exc(Runtime1::entry_for(Runtime1::forward_exception_id));
++      AddressLiteral exc(Runtime1::entry_for(C1StubId::forward_exception_id));
+       jump_to(exc, G4);
+       delayed()->nop();
+     }
+@@ -142,7 +142,7 @@ void StubAssembler::prologue(const char* name, bool must_gc_arguments) {
+   set_info(name, must_gc_arguments);
+ }
+ 
+-void StubAssembler::epilogue() {
++void StubAssembler::epilogue(bool use_pop) {
+   delayed()->restore();
+ }
+ 
+@@ -373,7 +373,7 @@ OopMapSet* Runtime1::generate_patching(StubAssembler* sasm, address target) {
+   return oop_maps;
+ }
+ 
+-OopMapSet* Runtime1::generate_code_for(StubID id, StubAssembler* sasm) {
++OopMapSet* Runtime1::generate_code_for(C1StubId id, StubAssembler* sasm) {
+ 
+   OopMapSet* oop_maps = NULL;
+   // for better readability
+@@ -382,25 +382,25 @@ OopMapSet* Runtime1::generate_code_for(StubID id, StubAssembler* sasm) {
+ 
+   // stub code & info for the different stubs
+   switch (id) {
+-    case forward_exception_id:
++    case C1StubId::forward_exception_id:
+       {
+         oop_maps = generate_handle_exception(id, sasm);
+       }
+       break;
+ 
+-    case new_instance_id:
+-    case fast_new_instance_id:
+-    case fast_new_instance_init_check_id:
++    case C1StubId::new_instance_id:
++    case C1StubId::fast_new_instance_id:
++    case C1StubId::fast_new_instance_init_check_id:
+       {
+         Register G5_klass = G5; // Incoming
+         Register O0_obj   = O0; // Outgoing
+ 
+-        if (id == new_instance_id) {
++        if (id == C1StubId::new_instance_id) {
+           __ set_info("new_instance", dont_gc_arguments);
+-        } else if (id == fast_new_instance_id) {
++        } else if (id == C1StubId::fast_new_instance_id) {
+           __ set_info("fast new_instance", dont_gc_arguments);
+         } else {
+-          assert(id == fast_new_instance_init_check_id, "bad StubID");
++          assert(id == C1StubId::fast_new_instance_init_check_id, "bad StubID");
+           __ set_info("fast new_instance init check", dont_gc_arguments);
+         }
+ 
+@@ -410,13 +410,13 @@ OopMapSet* Runtime1::generate_code_for(StubID id, StubAssembler* sasm) {
+ 
+       break;
+ 
+-    case counter_overflow_id:
++    case C1StubId::counter_overflow_id:
+         // G4 contains bci, G5 contains method
+       oop_maps = generate_stub_call(sasm, noreg, CAST_FROM_FN_PTR(address, counter_overflow), G4, G5);
+       break;
+ 
+-    case new_type_array_id:
+-    case new_object_array_id:
++    case C1StubId::new_type_array_id:
++    case C1StubId::new_object_array_id:
+       {
+         Register G5_klass = G5; // Incoming
+         Register G4_length = G4; // Incoming
+@@ -429,7 +429,7 @@ OopMapSet* Runtime1::generate_code_for(StubID id, StubAssembler* sasm) {
+         const int klass_lh_header_size_offset = ((BytesPerInt - 1)  // 3 - 2 selects byte {0,1,0,0}
+                                                  - Klass::_lh_header_size_shift / BitsPerByte);
+ 
+-        if (id == new_type_array_id) {
++        if (id == C1StubId::new_type_array_id) {
+           __ set_info("new_type_array", dont_gc_arguments);
+         } else {
+           __ set_info("new_object_array", dont_gc_arguments);
+@@ -442,7 +442,7 @@ OopMapSet* Runtime1::generate_code_for(StubID id, StubAssembler* sasm) {
+           Register G3_t1 = G3;
+           __ ld(klass_lh, G3_t1);
+           __ sra(G3_t1, Klass::_lh_array_tag_shift, G3_t1);
+-          int tag = ((id == new_type_array_id)
++          int tag = ((id == C1StubId::new_type_array_id)
+                      ? Klass::_lh_array_tag_type_value
+                      : Klass::_lh_array_tag_obj_value);
+           __ cmp_and_brx_short(G3_t1, tag, Assembler::equal, Assembler::pt, ok);
+@@ -452,7 +452,7 @@ OopMapSet* Runtime1::generate_code_for(StubID id, StubAssembler* sasm) {
+         }
+ #endif // ASSERT
+ 
+-        if (id == new_type_array_id) {
++        if (id == C1StubId::new_type_array_id) {
+           oop_maps = generate_stub_call(sasm, I0, CAST_FROM_FN_PTR(address, new_type_array), G5_klass, G4_length);
+         } else {
+           oop_maps = generate_stub_call(sasm, I0, CAST_FROM_FN_PTR(address, new_object_array), G5_klass, G4_length);
+@@ -461,7 +461,7 @@ OopMapSet* Runtime1::generate_code_for(StubID id, StubAssembler* sasm) {
+       }
+       break;
+ 
+-    case new_multi_array_id:
++    case C1StubId::new_multi_array_id:
+       { // O0: klass
+         // O1: rank
+         // O2: address of 1st dimension
+@@ -471,7 +471,7 @@ OopMapSet* Runtime1::generate_code_for(StubID id, StubAssembler* sasm) {
+       }
+       break;
+ 
+-    case register_finalizer_id:
++    case C1StubId::register_finalizer_id:
+       {
+         __ set_info("register_finalizer", dont_gc_arguments);
+ 
+@@ -479,9 +479,8 @@ OopMapSet* Runtime1::generate_code_for(StubID id, StubAssembler* sasm) {
+         Label register_finalizer;
+         Register t = O1;
+         __ load_klass(O0, t);
+-        __ ld(t, in_bytes(Klass::access_flags_offset()), t);
+-        __ set(JVM_ACC_HAS_FINALIZER, G3);
+-        __ andcc(G3, t, G0);
++        __ ldub(t, in_bytes(Klass::misc_flags_offset()), t);
++        __ andcc(t, KlassFlags::_misc_has_finalizer, G0);
+         __ br(Assembler::notZero, false, Assembler::pt, register_finalizer);
+         __ delayed()->nop();
+ 
+@@ -504,45 +503,45 @@ OopMapSet* Runtime1::generate_code_for(StubID id, StubAssembler* sasm) {
+       }
+       break;
+ 
+-    case throw_range_check_failed_id:
++    case C1StubId::throw_range_check_failed_id:
+       { __ set_info("range_check_failed", dont_gc_arguments); // arguments will be discarded
+         // G4: index
+         oop_maps = generate_exception_throw(sasm, CAST_FROM_FN_PTR(address, throw_range_check_exception), true);
+       }
+       break;
+ 
+-    case throw_index_exception_id:
++    case C1StubId::throw_index_exception_id:
+       { __ set_info("index_range_check_failed", dont_gc_arguments); // arguments will be discarded
+         // G4: index
+         oop_maps = generate_exception_throw(sasm, CAST_FROM_FN_PTR(address, throw_index_exception), true);
+       }
+       break;
+ 
+-    case throw_div0_exception_id:
++    case C1StubId::throw_div0_exception_id:
+       { __ set_info("throw_div0_exception", dont_gc_arguments);
+         oop_maps = generate_exception_throw(sasm, CAST_FROM_FN_PTR(address, throw_div0_exception), false);
+       }
+       break;
+ 
+-    case throw_null_pointer_exception_id:
++    case C1StubId::throw_null_pointer_exception_id:
+       { __ set_info("throw_null_pointer_exception", dont_gc_arguments);
+         oop_maps = generate_exception_throw(sasm, CAST_FROM_FN_PTR(address, throw_null_pointer_exception), false);
+       }
+       break;
+ 
+-    case handle_exception_id:
++    case C1StubId::handle_exception_id:
+       { __ set_info("handle_exception", dont_gc_arguments);
+         oop_maps = generate_handle_exception(id, sasm);
+       }
+       break;
+ 
+-    case handle_exception_from_callee_id:
++    case C1StubId::handle_exception_from_callee_id:
+       { __ set_info("handle_exception_from_callee", dont_gc_arguments);
+         oop_maps = generate_handle_exception(id, sasm);
+       }
+       break;
+ 
+-    case unwind_exception_id:
++    case C1StubId::unwind_exception_id:
+       {
+         // O0: exception
+         // I7: address of call to this method
+@@ -566,14 +565,14 @@ OopMapSet* Runtime1::generate_code_for(StubID id, StubAssembler* sasm) {
+       }
+       break;
+ 
+-    case throw_array_store_exception_id:
++    case C1StubId::throw_array_store_exception_id:
+       {
+         __ set_info("throw_array_store_exception", dont_gc_arguments);
+         oop_maps = generate_exception_throw(sasm, CAST_FROM_FN_PTR(address, throw_array_store_exception), true);
+       }
+       break;
+ 
+-    case throw_class_cast_exception_id:
++    case C1StubId::throw_class_cast_exception_id:
+       {
+         // G4: object
+         __ set_info("throw_class_cast_exception", dont_gc_arguments);
+@@ -581,14 +580,14 @@ OopMapSet* Runtime1::generate_code_for(StubID id, StubAssembler* sasm) {
+       }
+       break;
+ 
+-    case throw_incompatible_class_change_error_id:
++    case C1StubId::throw_incompatible_class_change_error_id:
+       {
+         __ set_info("throw_incompatible_class_cast_exception", dont_gc_arguments);
+         oop_maps = generate_exception_throw(sasm, CAST_FROM_FN_PTR(address, throw_incompatible_class_change_error), false);
+       }
+       break;
+ 
+-    case slow_subtype_check_id:
++    case C1StubId::slow_subtype_check_id:
+       { // Support for uint StubRoutine::partial_subtype_check( Klass sub, Klass super );
+         // Arguments :
+         //
+@@ -612,13 +611,13 @@ OopMapSet* Runtime1::generate_code_for(StubID id, StubAssembler* sasm) {
+         __ delayed()->restore();        // free copy or add can go here
+       }
+ 
+-    case monitorenter_nofpu_id:
+-    case monitorenter_id:
++    case C1StubId::monitorenter_nofpu_id:
++    case C1StubId::monitorenter_id:
+       { // G4: object
+         // G5: lock address
+         __ set_info("monitorenter", dont_gc_arguments);
+ 
+-        int save_fpu_registers = (id == monitorenter_id);
++        int save_fpu_registers = (id == C1StubId::monitorenter_id);
+         // make a frame and preserve the caller's caller-save registers
+         OopMap* oop_map = save_live_registers(sasm, save_fpu_registers);
+ 
+@@ -633,15 +632,15 @@ OopMapSet* Runtime1::generate_code_for(StubID id, StubAssembler* sasm) {
+       }
+       break;
+ 
+-    case monitorexit_nofpu_id:
+-    case monitorexit_id:
++    case C1StubId::monitorexit_nofpu_id:
++    case C1StubId::monitorexit_id:
+       { // G4: lock address
+         // note: really a leaf routine but must setup last java sp
+         //       => use call_RT for now (speed can be improved by
+         //       doing last java sp setup manually)
+         __ set_info("monitorexit", dont_gc_arguments);
+ 
+-        int save_fpu_registers = (id == monitorexit_id);
++        int save_fpu_registers = (id == C1StubId::monitorexit_id);
+         // make a frame and preserve the caller's caller-save registers
+         OopMap* oop_map = save_live_registers(sasm, save_fpu_registers);
+ 
+@@ -656,7 +655,7 @@ OopMapSet* Runtime1::generate_code_for(StubID id, StubAssembler* sasm) {
+       }
+       break;
+ 
+-    case deoptimize_id:
++    case C1StubId::deoptimize_id:
+       {
+         __ set_info("deoptimize", dont_gc_arguments);
+         OopMap* oop_map = save_live_registers(sasm);
+@@ -672,31 +671,31 @@ OopMapSet* Runtime1::generate_code_for(StubID id, StubAssembler* sasm) {
+       }
+       break;
+ 
+-    case access_field_patching_id:
++    case C1StubId::access_field_patching_id:
+       { __ set_info("access_field_patching", dont_gc_arguments);
+         oop_maps = generate_patching(sasm, CAST_FROM_FN_PTR(address, access_field_patching));
+       }
+       break;
+ 
+-    case load_klass_patching_id:
++    case C1StubId::load_klass_patching_id:
+       { __ set_info("load_klass_patching", dont_gc_arguments);
+         oop_maps = generate_patching(sasm, CAST_FROM_FN_PTR(address, move_klass_patching));
+       }
+       break;
+ 
+-    case load_mirror_patching_id:
++    case C1StubId::load_mirror_patching_id:
+       { __ set_info("load_mirror_patching", dont_gc_arguments);
+         oop_maps = generate_patching(sasm, CAST_FROM_FN_PTR(address, move_mirror_patching));
+       }
+       break;
+ 
+-    case load_appendix_patching_id:
++    case C1StubId::load_appendix_patching_id:
+       { __ set_info("load_appendix_patching", dont_gc_arguments);
+         oop_maps = generate_patching(sasm, CAST_FROM_FN_PTR(address, move_appendix_patching));
+       }
+       break;
+ 
+-    case dtrace_object_alloc_id:
++    case C1StubId::dtrace_object_alloc_id:
+       { // O0: object
+         __ set_info("dtrace_object_alloc", dont_gc_arguments);
+         // we can't gc here so skip the oopmap but make sure that all
+@@ -715,7 +714,7 @@ OopMapSet* Runtime1::generate_code_for(StubID id, StubAssembler* sasm) {
+       }
+       break;
+ 
+-    case predicate_failed_trap_id:
++    case C1StubId::predicate_failed_trap_id:
+       {
+         __ set_info("predicate_failed_trap", dont_gc_arguments);
+         OopMap* oop_map = save_live_registers(sasm);
+@@ -748,14 +747,19 @@ OopMapSet* Runtime1::generate_code_for(StubID id, StubAssembler* sasm) {
+ }
+ 
+ 
+-OopMapSet* Runtime1::generate_handle_exception(StubID id, StubAssembler* sasm) {
++uint Runtime1::runtime_blob_current_thread_offset(frame f) {
++  Unimplemented();
++  return 0;
++}
++
++OopMapSet* Runtime1::generate_handle_exception(C1StubId id, StubAssembler* sasm) {
+   __ block_comment("generate_handle_exception");
+ 
+   // Save registers, if required.
+   OopMapSet* oop_maps = new OopMapSet();
+   OopMap* oop_map = NULL;
+   switch (id) {
+-  case forward_exception_id:
++  case C1StubId::forward_exception_id:
+     // We're handling an exception in the context of a compiled frame.
+     // The registers have been saved in the standard places.  Perform
+     // an exception lookup in the caller and dispatch to the handler
+@@ -769,13 +773,13 @@ OopMapSet* Runtime1::generate_handle_exception(StubID id, StubAssembler* sasm) {
+      __ st_ptr(G0, G2_thread, in_bytes(JavaThread::pending_exception_offset()));
+      __ add(I7, frame::pc_return_offset, Oissuing_pc);
+     break;
+-  case handle_exception_id:
++  case C1StubId::handle_exception_id:
+     // At this point all registers MAY be live.
+     oop_map = save_live_registers(sasm);
+     __ mov(Oexception->after_save(),  Oexception);
+     __ mov(Oissuing_pc->after_save(), Oissuing_pc);
+     break;
+-  case handle_exception_from_callee_id:
++  case C1StubId::handle_exception_from_callee_id:
+     // At this point all registers except exception oop (Oexception)
+     // and exception pc (Oissuing_pc) are dead.
+     oop_map = new OopMap(frame_size_in_bytes / sizeof(jint), 0);
+@@ -825,13 +829,13 @@ OopMapSet* Runtime1::generate_handle_exception(StubID id, StubAssembler* sasm) {
+   // Restore the registers that were saved at the beginning, remove
+   // the frame and jump to the exception handler.
+   switch (id) {
+-  case forward_exception_id:
+-  case handle_exception_id:
++  case C1StubId::forward_exception_id:
++  case C1StubId::handle_exception_id:
+     restore_live_registers(sasm);
+     __ jmp(O0, 0);
+     __ delayed()->restore();
+     break;
+-  case handle_exception_from_callee_id:
++  case C1StubId::handle_exception_from_callee_id:
+     // Restore SP from L7 if the exception PC is a method handle call site.
+     __ mov(O0, G5);  // Save the target address.
+     __ lduw(Address(G2_thread, JavaThread::is_method_handle_return_offset()), L0);
+diff --git a/src/hotspot/cpu/sparc/c2_globals_sparc.hpp b/src/hotspot/cpu/sparc/c2_globals_sparc.hpp
+index 687c8e9..1edb312 100644
+--- a/src/hotspot/cpu/sparc/c2_globals_sparc.hpp
++++ b/src/hotspot/cpu/sparc/c2_globals_sparc.hpp
+@@ -85,5 +85,6 @@ define_pd_global(bool,  TrapBasedRangeChecks,        false); // Not needed on sp
+ 
+ // Ergonomics related flags
+ define_pd_global(bool, NeverActAsServerClassMachine, false);
++define_pd_global(uint, SuperWordStoreToLoadForwardingFailureDetection, 16);
+ 
+ #endif // CPU_SPARC_C2_GLOBALS_SPARC_HPP
+diff --git a/src/hotspot/cpu/sparc/continuationFreezeThaw_sparc.inline.hpp b/src/hotspot/cpu/sparc/continuationFreezeThaw_sparc.inline.hpp
+index 4f321e6..fb28330 100644
+--- a/src/hotspot/cpu/sparc/continuationFreezeThaw_sparc.inline.hpp
++++ b/src/hotspot/cpu/sparc/continuationFreezeThaw_sparc.inline.hpp
+@@ -83,6 +83,19 @@ inline void ThawBase::patch_pd(frame& f, const frame& caller) {
+   Unimplemented();
+ }
+ 
++inline void FreezeBase::prepare_freeze_interpreted_top_frame(frame& f) {
++  Unimplemented();
++}
++
++inline void ThawBase::patch_pd(frame& f, intptr_t* caller_sp) {
++  Unimplemented();
++}
++
++inline intptr_t* ThawBase::push_cleanup_continuation() {
++  Unimplemented();
++  return nullptr;
++}
++
+ template <typename ConfigT>
+ inline void Thaw<ConfigT>::patch_caller_links(intptr_t* sp, intptr_t* bottom) {
+   Unimplemented();
+diff --git a/src/hotspot/cpu/sparc/continuationHelper_sparc.inline.hpp b/src/hotspot/cpu/sparc/continuationHelper_sparc.inline.hpp
+index dc16994..6f60467 100644
+--- a/src/hotspot/cpu/sparc/continuationHelper_sparc.inline.hpp
++++ b/src/hotspot/cpu/sparc/continuationHelper_sparc.inline.hpp
+@@ -35,6 +35,10 @@ static inline intptr_t** link_address(const frame& f) {
+   return nullptr;
+ }
+ 
++static inline void patch_return_pc_with_preempt_stub(frame& f) {
++  Unimplemented();
++}
++
+ inline int ContinuationHelper::frame_align_words(int size) {
+   Unimplemented();
+   return 0;
+diff --git a/src/hotspot/cpu/sparc/frame_sparc.cpp b/src/hotspot/cpu/sparc/frame_sparc.cpp
+index d3a4f48..f0be276 100644
+--- a/src/hotspot/cpu/sparc/frame_sparc.cpp
++++ b/src/hotspot/cpu/sparc/frame_sparc.cpp
+@@ -173,6 +173,11 @@ void RegisterMap::shift_individual_registers() {
+   check_location_valid();
+ }
+ 
++JavaThread** frame::saved_thread_address(const frame& f) {
++  Unimplemented();
++  return nullptr;
++}
++
+ bool frame::safe_for_sender(JavaThread *thread) {
+ 
+   address _SP = (address) sp();
+diff --git a/src/hotspot/cpu/sparc/frame_sparc.inline.hpp b/src/hotspot/cpu/sparc/frame_sparc.inline.hpp
+index b3c7dd4..b9453af 100644
+--- a/src/hotspot/cpu/sparc/frame_sparc.inline.hpp
++++ b/src/hotspot/cpu/sparc/frame_sparc.inline.hpp
+@@ -34,6 +34,10 @@
+ 
+ // Constructors
+ 
++inline frame::frame(intptr_t* sp) {
++  Unimplemented();
++}
++
+ inline frame::frame() {
+   _pc = NULL;
+   _sp = NULL;
+diff --git a/src/hotspot/cpu/sparc/gc/g1/g1BarrierSetAssembler_sparc.cpp b/src/hotspot/cpu/sparc/gc/g1/g1BarrierSetAssembler_sparc.cpp
+index c0c0d39..4b6d8f4 100644
+--- a/src/hotspot/cpu/sparc/gc/g1/g1BarrierSetAssembler_sparc.cpp
++++ b/src/hotspot/cpu/sparc/gc/g1/g1BarrierSetAssembler_sparc.cpp
+@@ -40,6 +40,9 @@
+ #include "c1/c1_MacroAssembler.hpp"
+ #include "gc/g1/c1/g1BarrierSetC1.hpp"
+ #endif
++#ifdef COMPILER2
++#include "gc/g1/c2/g1BarrierSetC2.hpp"
++#endif
+ 
+ #define __ masm->
+ 
+@@ -500,6 +503,210 @@ void G1BarrierSetAssembler::barrier_stubs_init() {
+   }
+ }
+ 
++#ifdef COMPILER2
++
++// The runtime is called from a new register window, which keeps the %o, %l
++// and %i registers of the compiled frame. Only live globals and float
++// registers have to be saved around the call.
++static void generate_c2_barrier_runtime_call(MacroAssembler* masm, G1BarrierStubC2* stub,
++                                             Register arg, address runtime_path) {
++  assert(arg->is_global() || arg->is_out(), "must be visible after the save");
++  static const int n_globals = 4;
++  const Register globals[n_globals] = { G1, G3, G4, G5 };
++  const int n_doubles = FloatRegisterImpl::number_of_registers / 2;
++  const int global_slot = frame::memory_parameter_word_sp_offset;
++  const int double_slot = global_slot + n_globals;
++  const int frame_words = align_up(double_slot + n_doubles, 2);
++
++  bool save_global[n_globals] = { false };
++  bool save_double[n_doubles] = { false };
++  RegMaskIterator rmi(stub->preserve_set());
++  while (rmi.has_next()) {
++    const VMReg vm_reg = OptoReg::as_VMReg(rmi.next());
++    if (vm_reg->is_Register()) {
++      Register r = as_Register(vm_reg->value() >> 1);
++      for (int i = 0; i < n_globals; i++) {
++        if (r == globals[i]) {
++          save_global[i] = true;
++        }
++      }
++    } else if (vm_reg->is_FloatRegister()) {
++      save_double[(vm_reg->value() - ConcreteRegisterImpl::max_gpr) / 2] = true;
++    }
++  }
++
++  __ save(SP, -frame_words * wordSize, SP);
++  for (int i = 0; i < n_globals; i++) {
++    if (save_global[i]) {
++      __ stx(globals[i], SP, STACK_BIAS + (global_slot + i) * wordSize);
++    }
++  }
++  for (int i = 0; i < n_doubles; i++) {
++    if (save_double[i]) {
++      __ stf(FloatRegisterImpl::D, as_FloatRegister(2 * i), SP, STACK_BIAS + (double_slot + i) * wordSize);
++    }
++  }
++  __ call_VM_leaf(L7_thread_cache, runtime_path, arg->after_save(), G2_thread);
++  for (int i = 0; i < n_doubles; i++) {
++    if (save_double[i]) {
++      __ ldf(FloatRegisterImpl::D, SP, STACK_BIAS + (double_slot + i) * wordSize, as_FloatRegister(2 * i));
++    }
++  }
++  for (int i = 0; i < n_globals; i++) {
++    if (save_global[i]) {
++      __ ldx(SP, STACK_BIAS + (global_slot + i) * wordSize, globals[i]);
++    }
++  }
++  __ restore();
++}
++
++void G1BarrierSetAssembler::g1_write_barrier_pre_c2(MacroAssembler* masm,
++                                                    Register obj,
++                                                    Register pre_val,
++                                                    Register tmp1,
++                                                    Register tmp2,
++                                                    G1PreBarrierStubC2* stub) {
++  assert_different_registers(obj, pre_val, tmp1, tmp2);
++  assert(tmp1->is_global() && tmp2->is_global(), "used after the save");
++
++  stub->initialize_registers(obj, pre_val, G2_thread, tmp1, tmp2);
++
++  // Is marking active?
++  if (in_bytes(SATBMarkQueue::byte_width_of_active()) == 4) {
++    __ ld(G2_thread, in_bytes(G1ThreadLocalData::satb_mark_queue_active_offset()), tmp1);
++  } else {
++    guarantee(in_bytes(SATBMarkQueue::byte_width_of_active()) == 1, "Assumption");
++    __ ldsb(G2_thread, in_bytes(G1ThreadLocalData::satb_mark_queue_active_offset()), tmp1);
++  }
++  __ cmp(tmp1, G0);
++  __ br(Assembler::notEqual, false, Assembler::pn, *stub->entry());
++  __ delayed()->nop();
++
++  __ bind(*stub->continuation());
++}
++
++void G1BarrierSetAssembler::generate_c2_pre_barrier_stub(MacroAssembler* masm,
++                                                         G1PreBarrierStubC2* stub) const {
++  Assembler::InlineSkippedInstructionsCounter skip_counter(masm);
++  Label runtime;
++  Register obj     = stub->obj();
++  Register pre_val = stub->pre_val();
++  Register tmp1    = stub->tmp1();
++  Register tmp2    = stub->tmp2();
++
++  __ bind(*stub->entry());
++
++  if (obj != noreg) {
++    __ load_heap_oop(obj, 0, pre_val, noreg, AS_RAW);
++  }
++  __ cmp(pre_val, G0);
++  __ brx(Assembler::equal, false, Assembler::pt, *stub->continuation());
++  __ delayed()->nop();
++
++  // Can we store the value in the thread's SATB buffer?
++  int index_offset  = in_bytes(G1ThreadLocalData::satb_mark_queue_index_offset());
++  int buffer_offset = in_bytes(G1ThreadLocalData::satb_mark_queue_buffer_offset());
++  __ ld_ptr(G2_thread, index_offset, tmp1);
++  __ cmp(tmp1, G0);
++  __ brx(Assembler::equal, false, Assembler::pn, runtime);
++  __ delayed()->nop();
++  __ sub(tmp1, wordSize, tmp1);
++  __ st_ptr(tmp1, G2_thread, index_offset);
++  __ ld_ptr(G2_thread, buffer_offset, tmp2);
++  __ st_ptr(pre_val, tmp2, tmp1);
++  __ br(Assembler::always, false, Assembler::pt, *stub->continuation());
++  __ delayed()->nop();
++
++  __ bind(runtime);
++  Register arg = pre_val;
++  if (!(arg->is_global() || arg->is_out())) {
++    __ mov(pre_val, tmp1);
++    arg = tmp1;
++  }
++  generate_c2_barrier_runtime_call(masm, stub, arg, CAST_FROM_FN_PTR(address, G1BarrierSetRuntime::write_ref_field_pre_entry));
++  __ br(Assembler::always, false, Assembler::pt, *stub->continuation());
++  __ delayed()->nop();
++}
++
++void G1BarrierSetAssembler::g1_write_barrier_post_c2(MacroAssembler* masm,
++                                                     Register store_addr,
++                                                     Register new_val,
++                                                     Register tmp1,
++                                                     Register tmp2,
++                                                     Register tmp3,
++                                                     G1PostBarrierStubC2* stub) {
++  assert_different_registers(store_addr, new_val, tmp1, tmp2);
++  assert(tmp1->is_global() && tmp2->is_global() && tmp3->is_global(), "used after the save");
++
++  stub->initialize_registers(G2_thread, tmp1, tmp2, tmp3);
++
++  // Does store cross heap regions?
++  __ xor3(store_addr, new_val, tmp1);
++  __ srlx(tmp1, G1HeapRegion::LogOfHRGrainBytes, tmp1);
++  __ cmp(tmp1, G0);
++  __ brx(Assembler::equal, false, Assembler::pt, *stub->continuation());
++  __ delayed()->nop();
++
++  // Crosses regions, storing null?
++  if ((stub->barrier_data() & G1C2BarrierPostNotNull) == 0) {
++    __ cmp(new_val, G0);
++    __ brx(Assembler::equal, false, Assembler::pt, *stub->continuation());
++    __ delayed()->nop();
++  }
++
++  // From here on, tmp1 holds the card address.
++  CardTableBarrierSet* ct = barrier_set_cast<CardTableBarrierSet>(BarrierSet::barrier_set());
++  __ srlx(store_addr, CardTable::card_shift(), tmp1);
++  __ set((intptr_t)ct->card_table()->byte_map_base(), tmp2);
++  __ add(tmp1, tmp2, tmp1);
++  __ ldub(tmp1, 0, tmp2);
++  __ cmp(tmp2, (int)G1CardTable::g1_young_card_val());
++  __ br(Assembler::notEqual, false, Assembler::pn, *stub->entry());
++  __ delayed()->nop();
++
++  __ bind(*stub->continuation());
++}
++
++void G1BarrierSetAssembler::generate_c2_post_barrier_stub(MacroAssembler* masm,
++                                                          G1PostBarrierStubC2* stub) const {
++  Assembler::InlineSkippedInstructionsCounter skip_counter(masm);
++  Label runtime;
++  Register card_addr = stub->tmp1();
++  Register tmp2      = stub->tmp2();
++  Register tmp3      = stub->tmp3();
++
++  __ bind(*stub->entry());
++
++  __ membar(Assembler::Membar_mask_bits(Assembler::StoreLoad));
++  STATIC_ASSERT(CardTable::dirty_card_val() == 0);
++  __ ldub(card_addr, 0, tmp2);
++  __ cmp(tmp2, G0);
++  __ br(Assembler::equal, false, Assembler::pt, *stub->continuation());
++  __ delayed()->nop();
++  __ stb(G0, card_addr, 0);
++
++  // Can we store the card address in the thread's dirty card queue?
++  int index_offset  = in_bytes(G1ThreadLocalData::dirty_card_queue_index_offset());
++  int buffer_offset = in_bytes(G1ThreadLocalData::dirty_card_queue_buffer_offset());
++  __ ld_ptr(G2_thread, index_offset, tmp2);
++  __ cmp(tmp2, G0);
++  __ brx(Assembler::equal, false, Assembler::pn, runtime);
++  __ delayed()->nop();
++  __ sub(tmp2, wordSize, tmp2);
++  __ st_ptr(tmp2, G2_thread, index_offset);
++  __ ld_ptr(G2_thread, buffer_offset, tmp3);
++  __ st_ptr(card_addr, tmp3, tmp2);
++  __ br(Assembler::always, false, Assembler::pt, *stub->continuation());
++  __ delayed()->nop();
++
++  __ bind(runtime);
++  generate_c2_barrier_runtime_call(masm, stub, card_addr, CAST_FROM_FN_PTR(address, G1BarrierSetRuntime::write_ref_field_post_entry));
++  __ br(Assembler::always, false, Assembler::pt, *stub->continuation());
++  __ delayed()->nop();
++}
++
++#endif // COMPILER2
++
+ #ifdef COMPILER1
+ 
+ #undef __
+diff --git a/src/hotspot/cpu/sparc/gc/g1/g1BarrierSetAssembler_sparc.hpp b/src/hotspot/cpu/sparc/gc/g1/g1BarrierSetAssembler_sparc.hpp
+index 3c706b5..9142ec0 100644
+--- a/src/hotspot/cpu/sparc/gc/g1/g1BarrierSetAssembler_sparc.hpp
++++ b/src/hotspot/cpu/sparc/gc/g1/g1BarrierSetAssembler_sparc.hpp
+@@ -33,6 +33,8 @@ class LIR_Assembler;
+ class StubAssembler;
+ class G1PreBarrierStub;
+ class G1PostBarrierStub;
++class G1PreBarrierStubC2;
++class G1PostBarrierStubC2;
+ 
+ class G1BarrierSetAssembler: public ModRefBarrierSetAssembler {
+ protected:
+@@ -57,6 +59,26 @@ class G1BarrierSetAssembler: public ModRefBarrierSetAssembler {
+   virtual void load_at(MacroAssembler* masm, DecoratorSet decorators, BasicType type,
+                        Address src, Register dst, Register tmp);
+   virtual void barrier_stubs_init();
++
++#ifdef COMPILER2
++  void g1_write_barrier_pre_c2(MacroAssembler* masm,
++                               Register obj,
++                               Register pre_val,
++                               Register tmp1,
++                               Register tmp2,
++                               G1PreBarrierStubC2* c2_stub);
++  void generate_c2_pre_barrier_stub(MacroAssembler* masm,
++                                    G1PreBarrierStubC2* stub) const;
++  void g1_write_barrier_post_c2(MacroAssembler* masm,
++                                Register store_addr,
++                                Register new_val,
++                                Register tmp1,
++                                Register tmp2,
++                                Register tmp3,
++                                G1PostBarrierStubC2* c2_stub);
++  void generate_c2_post_barrier_stub(MacroAssembler* masm,
++                                     G1PostBarrierStubC2* stub) const;
++#endif
+ };
+ 
+ #endif // CPU_SPARC_GC_G1_G1BARRIERSETASSEMBLER_SPARC_HPP
+diff --git a/src/hotspot/cpu/sparc/gc/g1/g1_sparc.ad b/src/hotspot/cpu/sparc/gc/g1/g1_sparc.ad
+new file mode 100644
+index 0000000..7a26fb3
+--- /dev/null
++++ b/src/hotspot/cpu/sparc/gc/g1/g1_sparc.ad
+@@ -0,0 +1,332 @@
++//
++// Copyright (c) 2024, Oracle and/or its affiliates. All rights reserved.
++// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
++//
++// This code is free software; you can redistribute it and/or modify it
++// under the terms of the GNU General Public License version 2 only, as
++// published by the Free Software Foundation.
++//
++// This code is distributed in the hope that it will be useful, but WITHOUT
++// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
++// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
++// version 2 for more details (a copy is included in the LICENSE file that
++// accompanied this code).
++//
++// You should have received a copy of the GNU General Public License version
++// 2 along with this work; if not, write to the Free Software Foundation,
++// Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301 USA.
++//
++// Please contact Oracle, 500 Oracle Parkway, Redwood Shores, CA 94065 USA
++// or visit www.oracle.com if you need additional information or have any
++// questions.
++//
++
++
++source_hpp %{
++
++#include "gc/g1/c2/g1BarrierSetC2.hpp"
++#include "gc/shared/gc_globals.hpp"
++
++%}
++
++source %{
++
++#include "gc/g1/g1BarrierSetAssembler_sparc.hpp"
++#include "gc/g1/g1BarrierSetRuntime.hpp"
++
++// tmp1 and tmp2 must be global registers: the runtime call is made from a
++// new register window.
++static void write_barrier_pre(MacroAssembler* masm,
++                              const MachNode* node,
++                              Register obj,
++                              Register pre_val,
++                              Register tmp1,
++                              Register tmp2,
++                              Register preserve1 = noreg,
++                              Register preserve2 = noreg,
++                              Register preserve3 = noreg,
++                              Register no_preserve = noreg) {
++  if (!G1PreBarrierStubC2::needs_barrier(node)) {
++    return;
++  }
++  Assembler::InlineSkippedInstructionsCounter skip_counter(masm);
++  G1BarrierSetAssembler* g1_asm = static_cast<G1BarrierSetAssembler*>(BarrierSet::barrier_set()->barrier_set_assembler());
++  G1PreBarrierStubC2* const stub = G1PreBarrierStubC2::create(node);
++  Register preserve[] = { preserve1, preserve2, preserve3 };
++  for (Register r : preserve) {
++    if (r != noreg) {
++      stub->preserve(r);
++    }
++  }
++  if (no_preserve != noreg) {
++    stub->dont_preserve(no_preserve);
++  }
++  g1_asm->g1_write_barrier_pre_c2(masm, obj, pre_val, tmp1, tmp2, stub);
++}
++
++static void write_barrier_post(MacroAssembler* masm,
++                               const MachNode* node,
++                               Register store_addr,
++                               Register new_val,
++                               Register tmp1,
++                               Register tmp2,
++                               Register tmp3) {
++  if (!G1PostBarrierStubC2::needs_barrier(node)) {
++    return;
++  }
++  Assembler::InlineSkippedInstructionsCounter skip_counter(masm);
++  G1BarrierSetAssembler* g1_asm = static_cast<G1BarrierSetAssembler*>(BarrierSet::barrier_set()->barrier_set_assembler());
++  G1PostBarrierStubC2* const stub = G1PostBarrierStubC2::create(node);
++  g1_asm->g1_write_barrier_post_c2(masm, store_addr, new_val, tmp1, tmp2, tmp3, stub);
++}
++
++%}
++
++instruct g1StoreP(indirect mem, iRegP src, g1RegP tmp1, g3RegP tmp2, g4RegP tmp3, flagsReg ccr)
++%{
++  predicate(UseG1GC && n->as_Store()->barrier_data() != 0);
++  match(Set mem (StoreP mem src));
++  effect(TEMP tmp1, TEMP tmp2, TEMP tmp3, KILL ccr);
++  ins_cost(2 * (MEMORY_REF_COST + BRANCH_COST));
++  format %{ "STX    $src,$mem\t! ptr (G1)" %}
++  ins_encode %{
++    Register mem = as_Register($mem$$base);
++    write_barrier_pre(masm, this,
++                      mem             /* obj */,
++                      $tmp1$$Register /* pre_val */,
++                      $tmp2$$Register /* tmp1 */,
++                      $tmp3$$Register /* tmp2 */,
++                      mem, $src$$Register /* preserve */);
++    __ stx($src$$Register, mem, 0);
++    write_barrier_post(masm, this,
++                       mem             /* store_addr */,
++                       $src$$Register  /* new_val */,
++                       $tmp1$$Register /* tmp1 */,
++                       $tmp2$$Register /* tmp2 */,
++                       $tmp3$$Register /* tmp3 */);
++  %}
++  ins_pipe(istore_mem_reg);
++%}
++
++instruct g1StoreN(indirect mem, iRegN src, g1RegP tmp1, g3RegP tmp2, g4RegP tmp3, flagsReg ccr)
++%{
++  predicate(UseG1GC && n->as_Store()->barrier_data() != 0);
++  match(Set mem (StoreN mem src));
++  effect(TEMP tmp1, TEMP tmp2, TEMP tmp3, KILL ccr);
++  ins_cost(2 * (MEMORY_REF_COST + BRANCH_COST));
++  format %{ "STW    $src,$mem\t! compressed ptr (G1)" %}
++  ins_encode %{
++    Register mem = as_Register($mem$$base);
++    write_barrier_pre(masm, this,
++                      mem             /* obj */,
++                      $tmp1$$Register /* pre_val */,
++                      $tmp2$$Register /* tmp1 */,
++                      $tmp3$$Register /* tmp2 */,
++                      mem, $src$$Register /* preserve */);
++    __ stw($src$$Register, mem, 0);
++    if ((barrier_data() & G1C2BarrierPost) != 0) {
++      if ((barrier_data() & G1C2BarrierPostNotNull) == 0) {
++        __ decode_heap_oop($src$$Register, $tmp3$$Register);
++      } else {
++        __ decode_heap_oop_not_null($src$$Register, $tmp3$$Register);
++      }
++    }
++    write_barrier_post(masm, this,
++                       mem             /* store_addr */,
++                       $tmp3$$Register /* new_val */,
++                       $tmp1$$Register /* tmp1 */,
++                       $tmp2$$Register /* tmp2 */,
++                       $tmp3$$Register /* tmp3 */);
++  %}
++  ins_pipe(istore_mem_reg);
++%}
++
++instruct g1CompareAndSwapP(iRegP mem_ptr, iRegP oldval, iRegP newval, iRegI res, g1RegP tmp1, g3RegP tmp2, g4RegP tmp3, o7RegI tmp, flagsReg ccr)
++%{
++  predicate(UseG1GC && n->as_LoadStore()->barrier_data() != 0);
++  match(Set res (CompareAndSwapP mem_ptr (Binary oldval newval)));
++  match(Set res (WeakCompareAndSwapP mem_ptr (Binary oldval newval)));
++  effect(USE mem_ptr, TEMP res, TEMP tmp1, TEMP tmp2, TEMP tmp3, KILL tmp, KILL ccr);
++  ins_cost(4 * (MEMORY_REF_COST + BRANCH_COST));
++  format %{ "CASXA  [$mem_ptr],$oldval,$newval\t! ptr, $res = success (G1)" %}
++  ins_encode %{
++    Register mem = $mem_ptr$$Register;
++    write_barrier_pre(masm, this,
++                      mem             /* obj */,
++                      $tmp1$$Register /* pre_val */,
++                      $tmp2$$Register /* tmp1 */,
++                      $tmp3$$Register /* tmp2 */,
++                      mem, $oldval$$Register, $newval$$Register /* preserve */,
++                      $res$$Register /* no_preserve */);
++    __ mov($newval$$Register, O7);
++    __ casx(mem, $oldval$$Register, O7);
++    __ cmp($oldval$$Register, O7);
++    __ mov(1, $res$$Register);
++    __ movcc(Assembler::notEqual, false, Assembler::xcc, G0, $res$$Register);
++    write_barrier_post(masm, this,
++                       mem               /* store_addr */,
++                       $newval$$Register /* new_val */,
++                       $tmp1$$Register   /* tmp1 */,
++                       $tmp2$$Register   /* tmp2 */,
++                       $tmp3$$Register   /* tmp3 */);
++  %}
++  ins_pipe(long_memory_op);
++%}
++
++instruct g1CompareAndSwapN(iRegP mem_ptr, iRegN oldval, iRegN newval, iRegI res, g1RegP tmp1, g3RegP tmp2, g4RegP tmp3, o7RegI tmp, flagsReg ccr)
++%{
++  predicate(UseG1GC && n->as_LoadStore()->barrier_data() != 0);
++  match(Set res (CompareAndSwapN mem_ptr (Binary oldval newval)));
++  match(Set res (WeakCompareAndSwapN mem_ptr (Binary oldval newval)));
++  effect(USE mem_ptr, TEMP res, TEMP tmp1, TEMP tmp2, TEMP tmp3, KILL tmp, KILL ccr);
++  ins_cost(4 * (MEMORY_REF_COST + BRANCH_COST));
++  format %{ "CASA   [$mem_ptr],$oldval,$newval\t! compressed ptr, $res = success (G1)" %}
++  ins_encode %{
++    Register mem = $mem_ptr$$Register;
++    write_barrier_pre(masm, this,
++                      mem             /* obj */,
++                      $tmp1$$Register /* pre_val */,
++                      $tmp2$$Register /* tmp1 */,
++                      $tmp3$$Register /* tmp2 */,
++                      mem, $oldval$$Register, $newval$$Register /* preserve */,
++                      $res$$Register /* no_preserve */);
++    __ mov($newval$$Register, O7);
++    __ cas(mem, $oldval$$Register, O7);
++    __ cmp($oldval$$Register, O7);
++    __ mov(1, $res$$Register);
++    __ movcc(Assembler::notEqual, false, Assembler::icc, G0, $res$$Register);
++    if ((barrier_data() & G1C2BarrierPost) != 0) {
++      __ decode_heap_oop($newval$$Register, $tmp3$$Register);
++    }
++    write_barrier_post(masm, this,
++                       mem             /* store_addr */,
++                       $tmp3$$Register /* new_val */,
++                       $tmp1$$Register /* tmp1 */,
++                       $tmp2$$Register /* tmp2 */,
++                       $tmp3$$Register /* tmp3 */);
++  %}
++  ins_pipe(long_memory_op);
++%}
++
++instruct g1CompareAndExchangeP(iRegP mem_ptr, iRegP oldval, iRegP newval, g1RegP tmp1, g3RegP tmp2, g4RegP tmp3, flagsReg ccr)
++%{
++  predicate(UseG1GC && n->as_LoadStore()->barrier_data() != 0);
++  match(Set newval (CompareAndExchangeP mem_ptr (Binary oldval newval)));
++  effect(USE mem_ptr, TEMP tmp1, TEMP tmp2, TEMP tmp3, KILL ccr);
++  ins_cost(4 * (MEMORY_REF_COST + BRANCH_COST));
++  format %{ "CASXA  [$mem_ptr],$oldval,$newval\t! ptr (G1)" %}
++  ins_encode %{
++    Register mem = $mem_ptr$$Register;
++    write_barrier_pre(masm, this,
++                      mem             /* obj */,
++                      $tmp1$$Register /* pre_val */,
++                      $tmp2$$Register /* tmp1 */,
++                      $tmp3$$Register /* tmp2 */,
++                      mem, $oldval$$Register, $newval$$Register /* preserve */);
++    // newval is overwritten with the old value; keep the new one for the post barrier.
++    __ mov($newval$$Register, $tmp3$$Register);
++    __ casx(mem, $oldval$$Register, $newval$$Register);
++    write_barrier_post(masm, this,
++                       mem             /* store_addr */,
++                       $tmp3$$Register /* new_val */,
++                       $tmp1$$Register /* tmp1 */,
++                       $tmp2$$Register /* tmp2 */,
++                       $tmp3$$Register /* tmp3 */);
++  %}
++  ins_pipe(long_memory_op);
++%}
++
++instruct g1CompareAndExchangeN(iRegP mem_ptr, iRegN oldval, iRegN newval, g1RegP tmp1, g3RegP tmp2, g4RegP tmp3, flagsReg ccr)
++%{
++  predicate(UseG1GC && n->as_LoadStore()->barrier_data() != 0);
++  match(Set newval (CompareAndExchangeN mem_ptr (Binary oldval newval)));
++  effect(USE mem_ptr, TEMP tmp1, TEMP tmp2, TEMP tmp3, KILL ccr);
++  ins_cost(4 * (MEMORY_REF_COST + BRANCH_COST));
++  format %{ "CASA   [$mem_ptr],$oldval,$newval\t! compressed ptr (G1)" %}
++  ins_encode %{
++    Register mem = $mem_ptr$$Register;
++    write_barrier_pre(masm, this,
++                      mem             /* obj */,
++                      $tmp1$$Register /* pre_val */,
++                      $tmp2$$Register /* tmp1 */,
++                      $tmp3$$Register /* tmp2 */,
++                      mem, $oldval$$Register, $newval$$Register /* preserve */);
++    // newval is overwritten with the old value; keep the new one for the post barrier.
++    __ decode_heap_oop($newval$$Register, $tmp3$$Register);
++    __ cas(mem, $oldval$$Register, $newval$$Register);
++    write_barrier_post(masm, this,
++                       mem             /* store_addr */,
++                       $tmp3$$Register /* new_val */,
++                       $tmp1$$Register /* tmp1 */,
++                       $tmp2$$Register /* tmp2 */,
++                       $tmp3$$Register /* tmp3 */);
++  %}
++  ins_pipe(long_memory_op);
++%}
++
++instruct g1GetAndSetN(indirect mem, iRegN newval, g1RegP tmp1, g3RegP tmp2, g4RegP tmp3, flagsReg ccr)
++%{
++  predicate(UseG1GC && n->as_LoadStore()->barrier_data() != 0);
++  match(Set newval (GetAndSetN mem newval));
++  effect(TEMP tmp1, TEMP tmp2, TEMP tmp3, KILL ccr);
++  ins_cost(4 * (MEMORY_REF_COST + BRANCH_COST));
++  format %{ "SWAP   [$mem],$newval\t! compressed ptr (G1)" %}
++  ins_encode %{
++    Register mem = as_Register($mem$$base);
++    write_barrier_pre(masm, this,
++                      mem             /* obj */,
++                      $tmp1$$Register /* pre_val */,
++                      $tmp2$$Register /* tmp1 */,
++                      $tmp3$$Register /* tmp2 */,
++                      mem, $newval$$Register /* preserve */);
++    // newval is overwritten with the old value; keep the new one for the post barrier.
++    __ decode_heap_oop($newval$$Register, $tmp3$$Register);
++    __ swap(Address(mem, 0), $newval$$Register);
++    write_barrier_post(masm, this,
++                       mem             /* store_addr */,
++                       $tmp3$$Register /* new_val */,
++                       $tmp1$$Register /* tmp1 */,
++                       $tmp2$$Register /* tmp2 */,
++                       $tmp3$$Register /* tmp3 */);
++  %}
++  ins_pipe(long_memory_op);
++%}
++
++instruct g1LoadP(iRegP dst, indirect mem, g1RegP tmp1, g3RegP tmp2, flagsReg ccr)
++%{
++  predicate(UseG1GC && n->as_Load()->barrier_data() != 0);
++  match(Set dst (LoadP mem));
++  effect(TEMP dst, TEMP tmp1, TEMP tmp2, KILL ccr);
++  ins_cost(MEMORY_REF_COST + BRANCH_COST);
++  format %{ "LDX    $mem,$dst\t! ptr (G1)" %}
++  ins_encode %{
++    __ ldx(as_Register($mem$$base), 0, $dst$$Register);
++    write_barrier_pre(masm, this,
++                      noreg           /* obj */,
++                      $dst$$Register  /* pre_val */,
++                      $tmp1$$Register /* tmp1 */,
++                      $tmp2$$Register /* tmp2 */);
++  %}
++  ins_pipe(iload_mem);
++%}
++
++instruct g1LoadN(iRegN dst, indirect mem, g1RegP tmp1, g3RegP tmp2, g4RegP tmp3, flagsReg ccr)
++%{
++  predicate(UseG1GC && n->as_Load()->barrier_data() != 0);
++  match(Set dst (LoadN mem));
++  effect(TEMP dst, TEMP tmp1, TEMP tmp2, TEMP tmp3, KILL ccr);
++  ins_cost(MEMORY_REF_COST + BRANCH_COST);
++  format %{ "LDUW   $mem,$dst\t! compressed ptr (G1)" %}
++  ins_encode %{
++    __ lduw(as_Register($mem$$base), 0, $dst$$Register);
++    if ((barrier_data() & G1C2BarrierPre) != 0) {
++      __ decode_heap_oop($dst$$Register, $tmp1$$Register);
++    }
++    write_barrier_pre(masm, this,
++                      noreg           /* obj */,
++                      $tmp1$$Register /* pre_val */,
++                      $tmp2$$Register /* tmp1 */,
++                      $tmp3$$Register /* tmp2 */);
++  %}
++  ins_pipe(iload_mem);
++%}
+diff --git a/src/hotspot/cpu/sparc/gc/shared/barrierSetAssembler_sparc.cpp b/src/hotspot/cpu/sparc/gc/shared/barrierSetAssembler_sparc.cpp
+index 292991d..40e1764 100644
+--- a/src/hotspot/cpu/sparc/gc/shared/barrierSetAssembler_sparc.cpp
++++ b/src/hotspot/cpu/sparc/gc/shared/barrierSetAssembler_sparc.cpp
+@@ -143,7 +143,15 @@ void BarrierSetAssembler::nmethod_entry_barrier(MacroAssembler* masm) {
+ #ifdef COMPILER2
+ 
+ OptoReg::Name BarrierSetAssembler::refine_register(const Node* node, OptoReg::Name opto_reg) {
+-  Unimplemented(); // This must be implemented to support late barrier expansion.
++  if (!OptoReg::is_reg(opto_reg)) {
++    return OptoReg::Bad;
++  }
++  const VMReg vm_reg = OptoReg::as_VMReg(opto_reg);
++  if (!vm_reg->is_valid()) {
++    // skip the condition code registers
++    return OptoReg::Bad;
++  }
++  return opto_reg;
+ }
+ 
+ #endif // COMPILER2
+diff --git a/src/hotspot/cpu/sparc/macroAssembler_sparc.cpp b/src/hotspot/cpu/sparc/macroAssembler_sparc.cpp
+index d2e60b5..a11f5bd 100644
+--- a/src/hotspot/cpu/sparc/macroAssembler_sparc.cpp
++++ b/src/hotspot/cpu/sparc/macroAssembler_sparc.cpp
+@@ -2493,7 +2493,7 @@ void MacroAssembler::compiler_lock_object(Register Roop, Register Rmark,
+    // Try to CAS m->owner from null to Self
+    // Invariant: if we acquire the lock then _recursions should be 0.
+    add(Rmark, OM_OFFSET_NO_MONITOR_VALUE_TAG(owner), Rmark);
+-   mov(G2_thread, Rscratch);
++   ld_ptr(G2_thread, in_bytes(JavaThread::monitor_owner_id_offset()), Rscratch);
+    cas_ptr(Rmark, G0, Rscratch);
+    andcc(Rscratch, Rscratch, G0);             // set ICCs for done: icc.zf iff success
+    // set icc.zf : 1=success 0=failure
+@@ -2557,7 +2557,7 @@ void MacroAssembler::compiler_unlock_object(Register Roop, Register Rmark,
+    brx(Assembler::notZero, false, Assembler::pt, done);
+    delayed()->andcc(G0, G0, G0);
+    add(Rmark, OM_OFFSET_NO_MONITOR_VALUE_TAG(owner), Rmark);
+-   mov(G2_thread, Rscratch);
++   ld_ptr(G2_thread, in_bytes(JavaThread::monitor_owner_id_offset()), Rscratch);
+    cas_ptr(Rmark, G0, Rscratch);
+    cmp(Rscratch, G0);
+    // invert icc.zf and goto done
+@@ -2823,7 +2823,7 @@ void MacroAssembler::reserved_stack_check() {
+ 
+   call_VM_leaf(L0, CAST_FROM_FN_PTR(address, SharedRuntime::enable_stack_reserved_zone), G2_thread);
+ 
+-  AddressLiteral stub(StubRoutines::throw_delayed_StackOverflowError_entry());
++  AddressLiteral stub(SharedRuntime::throw_delayed_StackOverflowError_entry());
+   jump_to(stub, G4_scratch);
+   delayed()->restore();
+ 
+@@ -3034,12 +3034,10 @@ void MacroAssembler::encode_klass_not_null(Register r) {
+     set((intptr_t)CompressedKlassPointers::base(), G6_heapbase);
+     sub(r, G6_heapbase, r);
+     if (CompressedKlassPointers::shift() != 0) {
+-      assert (LogKlassAlignmentInBytes == CompressedKlassPointers::shift(), "decode alg wrong");
+-      srlx(r, LogKlassAlignmentInBytes, r);
++      srlx(r, CompressedKlassPointers::shift(), r);
+     }
+     reinit_heapbase();
+   } else {
+-    assert (LogKlassAlignmentInBytes == CompressedKlassPointers::shift() || CompressedKlassPointers::shift() == 0, "decode alg wrong");
+     srlx(r, CompressedKlassPointers::shift(), r);
+   }
+ }
+@@ -3053,11 +3051,10 @@ void MacroAssembler::encode_klass_not_null(Register src, Register dst) {
+       set((intptr_t)CompressedKlassPointers::base(), dst);
+       sub(src, dst, dst);
+       if (CompressedKlassPointers::shift() != 0) {
+-        srlx(dst, LogKlassAlignmentInBytes, dst);
++        srlx(dst, CompressedKlassPointers::shift(), dst);
+       }
+     } else {
+       // shift src into dst
+-      assert (LogKlassAlignmentInBytes == CompressedKlassPointers::shift() || CompressedKlassPointers::shift() == 0, "decode alg wrong");
+       srlx(src, CompressedKlassPointers::shift(), dst);
+     }
+   }
+@@ -3072,7 +3069,7 @@ int MacroAssembler::instr_size_for_decode_klass_not_null() {
+   if (CompressedKlassPointers::base() != NULL) {
+     // set + add + set
+     num_instrs += insts_for_internal_set((intptr_t)CompressedKlassPointers::base()) +
+-                  insts_for_internal_set((intptr_t)CompressedOops::ptrs_base());
++                  insts_for_internal_set((intptr_t)CompressedOops::base());
+     if (CompressedKlassPointers::shift() != 0) {
+       num_instrs += 1;  // sllx
+     }
+@@ -3090,11 +3087,10 @@ void  MacroAssembler::decode_klass_not_null(Register r) {
+     assert(r != G6_heapbase, "bad register choice");
+     set((intptr_t)CompressedKlassPointers::base(), G6_heapbase);
+     if (CompressedKlassPointers::shift() != 0)
+-      sllx(r, LogKlassAlignmentInBytes, r);
++      sllx(r, CompressedKlassPointers::shift(), r);
+     add(r, G6_heapbase, r);
+     reinit_heapbase();
+   } else {
+-    assert (LogKlassAlignmentInBytes == CompressedKlassPointers::shift() || CompressedKlassPointers::shift() == 0, "decode alg wrong");
+     sllx(r, CompressedKlassPointers::shift(), r);
+   }
+ }
+@@ -3110,7 +3106,7 @@ void  MacroAssembler::decode_klass_not_null(Register src, Register dst) {
+       if (CompressedKlassPointers::shift() != 0) {
+         assert((src != G6_heapbase) && (dst != G6_heapbase), "bad register choice");
+         set((intptr_t)CompressedKlassPointers::base(), G6_heapbase);
+-        sllx(src, LogKlassAlignmentInBytes, dst);
++        sllx(src, CompressedKlassPointers::shift(), dst);
+         add(dst, G6_heapbase, dst);
+         reinit_heapbase();
+       } else {
+@@ -3119,7 +3115,6 @@ void  MacroAssembler::decode_klass_not_null(Register src, Register dst) {
+       }
+     } else {
+       // shift/mov src into dst.
+-      assert (LogKlassAlignmentInBytes == CompressedKlassPointers::shift() || CompressedKlassPointers::shift() == 0, "decode alg wrong");
+       sllx(src, CompressedKlassPointers::shift(), dst);
+     }
+   }
+@@ -3128,9 +3123,9 @@ void  MacroAssembler::decode_klass_not_null(Register src, Register dst) {
+ void MacroAssembler::reinit_heapbase() {
+   if (UseCompressedOops || UseCompressedClassPointers) {
+     if (Universe::heap() != NULL) {
+-      set((intptr_t)CompressedOops::ptrs_base(), G6_heapbase);
++      set((intptr_t)CompressedOops::base(), G6_heapbase);
+     } else {
+-      AddressLiteral base(CompressedOops::ptrs_base_addr());
++      AddressLiteral base(CompressedOops::base_addr());
+       load_ptr_contents(base, G6_heapbase);
+     }
+   }
+diff --git a/src/hotspot/cpu/sparc/methodHandles_sparc.cpp b/src/hotspot/cpu/sparc/methodHandles_sparc.cpp
+index a36190c..4ccc47b 100644
+--- a/src/hotspot/cpu/sparc/methodHandles_sparc.cpp
++++ b/src/hotspot/cpu/sparc/methodHandles_sparc.cpp
+@@ -36,6 +36,7 @@
+ #include "prims/methodHandles.hpp"
+ #include "runtime/flags/flagSetting.hpp"
+ #include "runtime/frame.inline.hpp"
++#include "runtime/sharedRuntime.hpp"
+ #include "runtime/stubRoutines.hpp"
+ #include "utilities/preserveException.hpp"
+ 
+@@ -166,7 +167,7 @@ void MethodHandles::jump_from_method_handle(MacroAssembler* _masm, Register meth
+   __ delayed()->nop();
+ 
+   __ bind(L_no_such_method);
+-  AddressLiteral ame(StubRoutines::throw_AbstractMethodError_entry());
++  AddressLiteral ame(SharedRuntime::throw_AbstractMethodError_entry());
+   __ jump_to(ame, temp);
+   __ delayed()->nop();
+ }
+@@ -492,7 +493,7 @@ void MethodHandles::generate_method_handle_dispatch(MacroAssembler* _masm,
+ 
+     if (iid == vmIntrinsics::_linkToInterface) {
+       __ BIND(L_incompatible_class_change_error);
+-      AddressLiteral icce(StubRoutines::throw_IncompatibleClassChangeError_entry());
++      AddressLiteral icce(SharedRuntime::throw_IncompatibleClassChangeError_entry());
+       __ jump_to(icce, temp1);
+       __ delayed()->nop();
+     }
+diff --git a/src/hotspot/cpu/sparc/nativeInst_sparc.hpp b/src/hotspot/cpu/sparc/nativeInst_sparc.hpp
+index 373c6bf..75ba7a2 100644
+--- a/src/hotspot/cpu/sparc/nativeInst_sparc.hpp
++++ b/src/hotspot/cpu/sparc/nativeInst_sparc.hpp
+@@ -326,6 +326,8 @@ class NativeCall: public NativeInstruction {
+     displacement_offset                = 0,
+     instruction_offset                 = 0
+   };
++
++  static int byte_size() { return instruction_size; }
+   address instruction_address() const       { return addr_at(0); }
+   address next_instruction_address() const  { return addr_at(instruction_size); }
+   address return_address() const            { return addr_at(return_address_offset); }
+diff --git a/src/hotspot/cpu/sparc/sharedRuntime_sparc.cpp b/src/hotspot/cpu/sparc/sharedRuntime_sparc.cpp
+index 7817efd..0aa7f72 100644
+--- a/src/hotspot/cpu/sparc/sharedRuntime_sparc.cpp
++++ b/src/hotspot/cpu/sparc/sharedRuntime_sparc.cpp
+@@ -2627,7 +2627,7 @@ void SharedRuntime::generate_deopt_blob() {
+ //------------------------------generate_uncommon_trap_blob--------------------
+ // Ought to generate an ideal graph & compile, but here's some SPARC ASM
+ // instead.
+-void SharedRuntime::generate_uncommon_trap_blob() {
++void OptoRuntime::generate_uncommon_trap_blob() {
+   // allocate space for the code
+   ResourceMark rm;
+   // setup code generation tools
+@@ -2687,7 +2687,7 @@ void SharedRuntime::generate_uncommon_trap_blob() {
+   { Label L;
+     __ ld(O2UnrollBlock, in_bytes(Deoptimization::UnrollBlock::unpack_kind_offset()), O1);
+     __ cmp_and_br_short(O1, Deoptimization::Unpack_uncommon_trap, Assembler::equal, Assembler::pt, L);
+-    __ stop("SharedRuntime::generate_deopt_blob: expected Unpack_uncommon_trap");
++    __ stop("OptoRuntime::generate_uncommon_trap_blob: expected Unpack_uncommon_trap");
+     __ bind(L);
+   }
+ #endif
+@@ -2736,7 +2736,93 @@ void SharedRuntime::generate_uncommon_trap_blob() {
+ // the 64-bit %o's, then do a save, then fixup the caller's SP (our FP).
+ // Tricky, tricky, tricky...
+ 
+-SafepointBlob* SharedRuntime::generate_handler_blob(address call_ptr, int poll_type) {
++#if INCLUDE_JFR
++RuntimeStub* SharedRuntime::generate_jfr_write_checkpoint() {
++  return nullptr;
++}
++
++RuntimeStub* SharedRuntime::generate_jfr_return_lease() {
++  return nullptr;
++}
++#endif // INCLUDE_JFR
++
++VMReg SharedRuntime::thread_register() {
++  Unimplemented();
++  return nullptr;
++}
++
++#define __ masm->
++RuntimeStub* SharedRuntime::generate_throw_exception(SharedStubId id, address runtime_entry) {
++    const char* name = SharedRuntime::stub_name(id);
++    Register arg1 = noreg;
++    Register arg2 = noreg;
++#ifdef ASSERT
++    int insts_size = 600;
++#else
++    int insts_size = 256;
++#endif /* ASSERT */
++    int locs_size  = 32;
++
++    CodeBuffer      code(name, insts_size, locs_size);
++    MacroAssembler* masm = new MacroAssembler(&code);
++
++    __ verify_thread();
++
++    // This is an inlined and slightly modified version of call_VM
++    // which has the ability to fetch the return PC out of thread-local storage
++    __ assert_not_delayed();
++
++    // Note that we always push a frame because on the SPARC
++    // architecture, for all of our implicit exception kinds at call
++    // sites, the implicit exception is taken before the callee frame
++    // is pushed.
++    __ save_frame(0);
++
++    int frame_complete = __ offset();
++
++    // Note that we always have a runtime stub frame on the top of stack by this point
++    Register last_java_sp = SP;
++    // 64-bit last_java_sp is biased!
++    __ set_last_Java_frame(last_java_sp, G0);
++    __ save_thread(noreg);
++    if (arg1 != noreg) {
++      assert(arg2 != O1, "clobbered");
++      __ mov(arg1, O1);
++    }
++    if (arg2 != noreg) {
++      __ mov(arg2, O2);
++    }
++    // do the call
++    __ block_comment("call runtime_entry");
++    __ call(runtime_entry, relocInfo::runtime_call_type);
++    __ delayed()->mov(G2_thread, O0);  // pass thread as first argument
++    __ restore_thread(noreg);
++    __ reset_last_Java_frame();
++
++    // check for pending exceptions. use Gtemp as scratch register.
++#ifdef ASSERT
++    Label L;
++
++    Address exception_addr(G2_thread, Thread::pending_exception_offset());
++    Register scratch_reg = Gtemp;
++    __ ld_ptr(exception_addr, scratch_reg);
++    __ br_notnull_short(scratch_reg, Assembler::pt, L);
++    __ should_not_reach_here();
++    __ bind(L);
++#endif // ASSERT
++    __ block_comment("call forward_exception_entry");
++    __ call(StubRoutines::forward_exception_entry(), relocInfo::runtime_call_type);
++    // we use O7 linkage so that forward_exception_entry has the issuing PC
++    __ delayed()->restore();
++
++    RuntimeStub* stub = RuntimeStub::new_runtime_stub(name, &code, frame_complete, masm->total_frame_size_in_bytes(0), NULL, false);
++    return stub;
++}
++
++#undef __
++#define __ masm->
++
++SafepointBlob* SharedRuntime::generate_handler_blob(SharedStubId id, address call_ptr) {
+   assert (StubRoutines::forward_exception_entry() != NULL, "must be generated before");
+ 
+   // allocate space for the code
+@@ -2744,7 +2830,8 @@ SafepointBlob* SharedRuntime::generate_handler_blob(address call_ptr, int poll_t
+   // setup code generation tools
+   // Measured 8/7/03 at 896 in 32bit debug build (no VerifyThread)
+   // Measured 8/7/03 at 1080 in 32bit debug build (VerifyThread)
+-  CodeBuffer buffer("handler_blob", 1600, 512);
++  const char* name = SharedRuntime::stub_name(id);
++  CodeBuffer buffer(name, 1600, 512);
+   MacroAssembler* masm                = new MacroAssembler(&buffer);
+   int             frame_size_words;
+   OopMapSet *oop_maps = new OopMapSet();
+@@ -2752,7 +2839,7 @@ SafepointBlob* SharedRuntime::generate_handler_blob(address call_ptr, int poll_t
+ 
+   int start = __ offset();
+ 
+-  bool cause_return = (poll_type == POLL_AT_RETURN);
++  bool cause_return = (id == SharedStubId::polling_page_return_handler_id);
+   // If this causes a return before the processing, then do a "restore"
+   if (cause_return) {
+     __ restore();
+@@ -2843,7 +2930,8 @@ SafepointBlob* SharedRuntime::generate_handler_blob(address call_ptr, int poll_t
+ // but since this is generic code we don't know what they are and the caller
+ // must do any gc of the args.
+ //
+-RuntimeStub* SharedRuntime::generate_resolve_blob(address destination, const char* name) {
++RuntimeStub* SharedRuntime::generate_resolve_blob(SharedStubId id, address destination) {
++  const char* name = SharedRuntime::stub_name(id);
+   assert (StubRoutines::forward_exception_entry() != NULL, "must be generated before");
+ 
+   // allocate space for the code
+diff --git a/src/hotspot/cpu/sparc/sparc.ad b/src/hotspot/cpu/sparc/sparc.ad
+index 2f3c4a9..d5a52d3 100644
+--- a/src/hotspot/cpu/sparc/sparc.ad
++++ b/src/hotspot/cpu/sparc/sparc.ad
+@@ -830,7 +830,6 @@ void emit_form3_mem_reg(C2_MacroAssembler *masm, PhaseRegAlloc* ra, const MachNo
+       // a Store
+       // inputs are (0:control, 1:memory, 2:address, 3:value)
+       if (!(n->ideal_Opcode()==st_op)    && // Following are special cases
+-          !(n->ideal_Opcode()==Op_StoreCM && st_op==Op_StoreB) &&
+           !(n->ideal_Opcode()==Op_StoreI && st_op==Op_StoreF) &&
+           !(n->ideal_Opcode()==Op_StoreF && st_op==Op_StoreI) &&
+           !(n->ideal_Opcode()==Op_StoreL && st_op==Op_StoreI) &&
+@@ -840,7 +839,7 @@ void emit_form3_mem_reg(C2_MacroAssembler *masm, PhaseRegAlloc* ra, const MachNo
+       }
+     }
+ 
+-    if (src2_enc == R_G0_enc && n->rule() != loadUB_rule && n->ideal_Opcode() != Op_StoreCM ) {
++    if (src2_enc == R_G0_enc && n->rule() != loadUB_rule) {
+       Node* addr = n->in(2);
+       if (!(addr->is_Mach() && addr->as_Mach()->ideal_Opcode() == Op_AddP)) {
+         const TypeOopPtr* atype = addr->bottom_type()->isa_instptr();  // %%% oopptr?
+@@ -1624,10 +1623,6 @@ const RegMask* Matcher::predicate_reg_mask(void) {
+   return NULL;
+ }
+ 
+-const TypeVectMask* Matcher::predicate_reg_type(const Type* elemTy, int length) {
+-  return NULL;
+-}
+-
+ // Vector calling convention not yet implemented.
+ bool Matcher::supports_vector_calling_convention(void) {
+   return false;
+@@ -5476,6 +5471,7 @@ instruct loadI_freg(regF dst, memory mem) %{
+ 
+ // Load Pointer
+ instruct loadP(iRegP dst, memory mem) %{
++  predicate(!(UseG1GC && n->as_Load()->barrier_data() != 0));
+   match(Set dst (LoadP mem));
+   ins_cost(MEMORY_REF_COST);
+   size(4);
+@@ -5489,6 +5485,7 @@ instruct loadP(iRegP dst, memory mem) %{
+ 
+ // Load Compressed Pointer
+ instruct loadN(iRegN dst, memory mem) %{
++  predicate(!(UseG1GC && n->as_Load()->barrier_data() != 0));
+   match(Set dst (LoadN mem));
+   ins_cost(MEMORY_REF_COST);
+   size(4);
+@@ -5796,16 +5793,6 @@ instruct storeB0(memory mem, immI0 src) %{
+   ins_pipe(istore_mem_zero);
+ %}
+ 
+-instruct storeCM0(memory mem, immI0 src) %{
+-  match(Set mem (StoreCM mem src));
+-  ins_cost(MEMORY_REF_COST);
+-
+-  format %{ "STB    $src,$mem\t! CMS card-mark byte 0" %}
+-  opcode(Assembler::stb_op3);
+-  ins_encode(simple_form3_mem_reg( mem, R_G0 ) );
+-  ins_pipe(istore_mem_zero);
+-%}
+-
+ // Store Char/Short
+ instruct storeC(memory mem, iRegI src) %{
+   match(Set mem (StoreC mem src));
+@@ -5881,6 +5868,7 @@ instruct storeI_Freg(memory mem, regF src) %{
+ 
+ // Store Pointer
+ instruct storeP(memory dst, sp_ptr_RegP src) %{
++  predicate(!(UseG1GC && n->as_Store()->barrier_data() != 0));
+   match(Set dst (StoreP dst src));
+   ins_cost(MEMORY_REF_COST);
+ 
+@@ -5891,6 +5879,7 @@ instruct storeP(memory dst, sp_ptr_RegP src) %{
+ %}
+ 
+ instruct storeP0(memory dst, immP0 src) %{
++  predicate(!(UseG1GC && n->as_Store()->barrier_data() != 0));
+   match(Set dst (StoreP dst src));
+   ins_cost(MEMORY_REF_COST);
+ 
+@@ -5902,6 +5891,7 @@ instruct storeP0(memory dst, immP0 src) %{
+ 
+ // Store Compressed Pointer
+ instruct storeN(memory dst, iRegN src) %{
++  predicate(!(UseG1GC && n->as_Store()->barrier_data() != 0));
+    match(Set dst (StoreN dst src));
+    ins_cost(MEMORY_REF_COST);
+    size(4);
+@@ -5940,6 +5930,7 @@ instruct storeNKlass(memory dst, iRegN src) %{
+ %}
+ 
+ instruct storeN0(memory dst, immN0 src) %{
++  predicate(!(UseG1GC && n->as_Store()->barrier_data() != 0));
+    match(Set dst (StoreN dst src));
+    ins_cost(MEMORY_REF_COST);
+    size(4);
+@@ -6706,7 +6697,7 @@ instruct compareAndSwapI_bool(iRegP mem_ptr, iRegI oldval, iRegI newval, iRegI r
+ %}
+ 
+ instruct compareAndSwapP_bool(iRegP mem_ptr, iRegP oldval, iRegP newval, iRegI res, o7RegI tmp1, flagsReg ccr ) %{
+-  predicate(VM_Version::supports_cx8());
++  predicate(VM_Version::supports_cx8() && !(UseG1GC && n->as_LoadStore()->barrier_data() != 0));
+   match(Set res (CompareAndSwapP mem_ptr (Binary oldval newval)));
+   match(Set res (WeakCompareAndSwapP mem_ptr (Binary oldval newval)));
+   effect( USE mem_ptr, KILL ccr, KILL tmp1);
+@@ -6723,6 +6714,7 @@ instruct compareAndSwapP_bool(iRegP mem_ptr, iRegP oldval, iRegP newval, iRegI r
+ %}
+ 
+ instruct compareAndSwapN_bool(iRegP mem_ptr, iRegN oldval, iRegN newval, iRegI res, o7RegI tmp1, flagsReg ccr ) %{
++  predicate(!(UseG1GC && n->as_LoadStore()->barrier_data() != 0));
+   match(Set res (CompareAndSwapN mem_ptr (Binary oldval newval)));
+   match(Set res (WeakCompareAndSwapN mem_ptr (Binary oldval newval)));
+   effect( USE mem_ptr, KILL ccr, KILL tmp1);
+@@ -6764,6 +6756,7 @@ instruct compareAndExchangeL(iRegP mem_ptr, iRegL oldval, iRegL newval)
+ 
+ instruct compareAndExchangeP(iRegP mem_ptr, iRegP oldval, iRegP newval)
+ %{
++  predicate(!(UseG1GC && n->as_LoadStore()->barrier_data() != 0));
+   match(Set newval (CompareAndExchangeP mem_ptr (Binary oldval newval)));
+   effect( USE mem_ptr );
+ 
+@@ -6776,6 +6769,7 @@ instruct compareAndExchangeP(iRegP mem_ptr, iRegP oldval, iRegP newval)
+ 
+ instruct compareAndExchangeN(iRegP mem_ptr, iRegN oldval, iRegN newval)
+ %{
++  predicate(!(UseG1GC && n->as_LoadStore()->barrier_data() != 0));
+   match(Set newval (CompareAndExchangeN mem_ptr (Binary oldval newval)));
+   effect( USE mem_ptr );
+ 
+@@ -6798,6 +6792,7 @@ instruct xchgI( memory mem, iRegI newval) %{
+ 
+ 
+ instruct xchgN( memory mem, iRegN newval) %{
++  predicate(!(UseG1GC && n->as_LoadStore()->barrier_data() != 0));
+   match(Set newval (GetAndSetN mem newval));
+   format %{ "SWAP  [$mem],$newval" %}
+   size(4);
+@@ -9606,6 +9601,22 @@ instruct RethrowException()
+   ins_pipe(tail_call);
+ %}
+ 
++// Forward exception.
++instruct ForwardExceptionjmp()
++%{
++  match(ForwardException);
++  ins_cost(CALL_COST);
++
++  format %{ "Jmp    forward_exception_stub" %}
++  ins_encode %{
++    AddressLiteral exception_entry(StubRoutines::forward_exception_entry(), relocInfo::runtime_call_type);
++    __ jump_to(exception_entry, G3);
++    __ delayed()->nop();
++  %}
++  ins_avoid_back_to_back(AVOID_BEFORE);
++  ins_pipe(tail_call);
++%}
++
+ 
+ // Die now
+ instruct ShouldNotReachHere( )
+diff --git a/src/hotspot/cpu/sparc/stubGenerator_sparc.cpp b/src/hotspot/cpu/sparc/stubGenerator_sparc.cpp
+index 3623db4..0a6c237 100644
+--- a/src/hotspot/cpu/sparc/stubGenerator_sparc.cpp
++++ b/src/hotspot/cpu/sparc/stubGenerator_sparc.cpp
+@@ -395,71 +395,6 @@ class StubGenerator: public StubCodeGenerator {
+ #undef __
+ #define __ masm->
+ 
+-  address generate_throw_exception(const char* name, address runtime_entry,
+-                                   Register arg1 = noreg, Register arg2 = noreg) {
+-#ifdef ASSERT
+-    int insts_size = 600;
+-#else
+-    int insts_size = 256;
+-#endif /* ASSERT */
+-    int locs_size  = 32;
+-
+-    CodeBuffer      code(name, insts_size, locs_size);
+-    MacroAssembler* masm = new MacroAssembler(&code);
+-
+-    __ verify_thread();
+-
+-    // This is an inlined and slightly modified version of call_VM
+-    // which has the ability to fetch the return PC out of thread-local storage
+-    __ assert_not_delayed();
+-
+-    // Note that we always push a frame because on the SPARC
+-    // architecture, for all of our implicit exception kinds at call
+-    // sites, the implicit exception is taken before the callee frame
+-    // is pushed.
+-    __ save_frame(0);
+-
+-    int frame_complete = __ offset();
+-
+-    // Note that we always have a runtime stub frame on the top of stack by this point
+-    Register last_java_sp = SP;
+-    // 64-bit last_java_sp is biased!
+-    __ set_last_Java_frame(last_java_sp, G0);
+-    __ save_thread(noreg);
+-    if (arg1 != noreg) {
+-      assert(arg2 != O1, "clobbered");
+-      __ mov(arg1, O1);
+-    }
+-    if (arg2 != noreg) {
+-      __ mov(arg2, O2);
+-    }
+-    // do the call
+-    BLOCK_COMMENT("call runtime_entry");
+-    __ call(runtime_entry, relocInfo::runtime_call_type);
+-    __ delayed()->mov(G2_thread, O0);  // pass thread as first argument
+-    __ restore_thread(noreg);
+-    __ reset_last_Java_frame();
+-
+-    // check for pending exceptions. use Gtemp as scratch register.
+-#ifdef ASSERT
+-    Label L;
+-
+-    Address exception_addr(G2_thread, Thread::pending_exception_offset());
+-    Register scratch_reg = Gtemp;
+-    __ ld_ptr(exception_addr, scratch_reg);
+-    __ br_notnull_short(scratch_reg, Assembler::pt, L);
+-    __ should_not_reach_here();
+-    __ bind(L);
+-#endif // ASSERT
+-    BLOCK_COMMENT("call forward_exception_entry");
+-    __ call(StubRoutines::forward_exception_entry(), relocInfo::runtime_call_type);
+-    // we use O7 linkage so that forward_exception_entry has the issuing PC
+-    __ delayed()->restore();
+-
+-    RuntimeStub* stub = RuntimeStub::new_runtime_stub(name, &code, frame_complete, masm->total_frame_size_in_bytes(0), NULL, false);
+-    return stub->entry_point();
+-  }
+-
+ #undef __
+ #define __ _masm->
+ 
+@@ -5645,12 +5580,6 @@ class StubGenerator: public StubCodeGenerator {
+     StubRoutines::Sparc::_flush_callers_register_windows_entry = generate_flush_callers_register_windows();
+ 
+     // Build this early so it's available for the interpreter.
+-    StubRoutines::_throw_StackOverflowError_entry =
+-            generate_throw_exception("StackOverflowError throw_exception",
+-            CAST_FROM_FN_PTR(address, SharedRuntime::throw_StackOverflowError));
+-    StubRoutines::_throw_delayed_StackOverflowError_entry =
+-            generate_throw_exception("delayed StackOverflowError throw_exception",
+-            CAST_FROM_FN_PTR(address, SharedRuntime::throw_delayed_StackOverflowError));
+ 
+     if (UseCRC32Intrinsics) {
+       // set table address before stub generation which use it
+@@ -5716,9 +5645,6 @@ class StubGenerator: public StubCodeGenerator {
+     // UseZeroBaseCompressedOops which is defined after heap initialization.
+     StubRoutines::Sparc::_partial_subtype_check                = generate_partial_subtype_check();
+     // These entry points require SharedInfo::stack0 to be set up in non-core builds
+-    StubRoutines::_throw_AbstractMethodError_entry         = generate_throw_exception("AbstractMethodError throw_exception",          CAST_FROM_FN_PTR(address, SharedRuntime::throw_AbstractMethodError));
+-    StubRoutines::_throw_IncompatibleClassChangeError_entry= generate_throw_exception("IncompatibleClassChangeError throw_exception", CAST_FROM_FN_PTR(address, SharedRuntime::throw_IncompatibleClassChangeError));
+-    StubRoutines::_throw_NullPointerException_at_call_entry= generate_throw_exception("NullPointerException at call throw_exception", CAST_FROM_FN_PTR(address, SharedRuntime::throw_NullPointerException_at_call));
+ 
+     // support for verify_oop (must happen after universe_init)
+     StubRoutines::_verify_oop_subroutine_entry     = generate_verify_oop_subroutine();
+diff --git a/src/hotspot/cpu/sparc/templateInterpreterGenerator_sparc.cpp b/src/hotspot/cpu/sparc/templateInterpreterGenerator_sparc.cpp
+index 2cf08f0..d8d5f92 100644
+--- a/src/hotspot/cpu/sparc/templateInterpreterGenerator_sparc.cpp
++++ b/src/hotspot/cpu/sparc/templateInterpreterGenerator_sparc.cpp
+@@ -534,8 +534,8 @@ void TemplateInterpreterGenerator::generate_stack_overflow_check(Register Rframe
+ 
+   // Note also that the restored frame is not necessarily interpreted.
+   // Use the shared runtime version of the StackOverflowError.
+-  assert(StubRoutines::throw_StackOverflowError_entry() != NULL, "stub not yet generated");
+-  AddressLiteral stub(StubRoutines::throw_StackOverflowError_entry());
++  assert(SharedRuntime::throw_StackOverflowError_entry() != NULL, "stub not yet generated");
++  AddressLiteral stub(SharedRuntime::throw_StackOverflowError_entry());
+   __ jump_to(stub, Rscratch);
+   __ delayed()->mov(O5_savedSP, SP);
+ 
+@@ -997,6 +997,7 @@ address TemplateInterpreterGenerator::generate_CRC32C_updateBytes_entry(Abstract
+ 
+ // Not supported
+ address TemplateInterpreterGenerator::generate_currentThread() { return nullptr; }
++address TemplateInterpreterGenerator::generate_cont_resume_interpreter_adapter() { return nullptr; }
+ address TemplateInterpreterGenerator::generate_Float_intBitsToFloat_entry() { return nullptr; }
+ address TemplateInterpreterGenerator::generate_Float_floatToRawIntBits_entry() { return nullptr; }
+ address TemplateInterpreterGenerator::generate_Double_longBitsToDouble_entry() { return nullptr; }
+diff --git a/src/hotspot/cpu/sparc/templateTable_sparc.cpp b/src/hotspot/cpu/sparc/templateTable_sparc.cpp
+index fd88372..641b262 100644
+--- a/src/hotspot/cpu/sparc/templateTable_sparc.cpp
++++ b/src/hotspot/cpu/sparc/templateTable_sparc.cpp
+@@ -1995,9 +1995,8 @@ void TemplateTable::_return(TosState state) {
+     __ mov(G0, G3_scratch);
+     __ access_local_ptr(G3_scratch, Otos_i);
+     __ load_klass(Otos_i, O2);
+-    __ set(JVM_ACC_HAS_FINALIZER, G3);
+-    __ ld(O2, in_bytes(Klass::access_flags_offset()), O2);
+-    __ andcc(G3, O2, G0);
++    __ ldub(O2, in_bytes(Klass::misc_flags_offset()), O2);
++    __ andcc(O2, KlassFlags::_misc_has_finalizer, G0);
+     Label skip_register_finalizer;
+     __ br(Assembler::zero, false, Assembler::pn, skip_register_finalizer);
+     __ delayed()->nop();

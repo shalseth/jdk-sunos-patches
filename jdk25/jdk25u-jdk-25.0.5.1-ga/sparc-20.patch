@@ -1,0 +1,898 @@
+diff --git a/src/hotspot/cpu/sparc/abstractInterpreter_sparc.cpp b/src/hotspot/cpu/sparc/abstractInterpreter_sparc.cpp
+index 0363bcf..61ed52e 100644
+--- a/src/hotspot/cpu/sparc/abstractInterpreter_sparc.cpp
++++ b/src/hotspot/cpu/sparc/abstractInterpreter_sparc.cpp
+@@ -175,7 +175,10 @@ void AbstractInterpreter::layout_activation(Method* method,
+   intptr_t* fp = interpreter_frame->fp();
+ 
+   JavaThread* thread = JavaThread::current();
+-  RegisterMap map(thread, false);
++  RegisterMap map(thread,
++                  RegisterMap::UpdateMap::skip,
++                  RegisterMap::ProcessFrames::include,
++                  RegisterMap::WalkContinuation::skip);
+   // More verification that skeleton frame is properly walkable
+   assert(fp == caller->sp(), "fp must match");
+ 
+diff --git a/src/hotspot/cpu/sparc/c1_LIRGenerator_sparc.cpp b/src/hotspot/cpu/sparc/c1_LIRGenerator_sparc.cpp
+index 18c1c54..616ebca 100644
+--- a/src/hotspot/cpu/sparc/c1_LIRGenerator_sparc.cpp
++++ b/src/hotspot/cpu/sparc/c1_LIRGenerator_sparc.cpp
+@@ -1268,7 +1268,3 @@ void LIRGenerator::volatile_field_load(LIR_Address* address, LIR_Opr result,
+                                        CodeEmitInfo* info) {
+   __ load(address, result, info);
+ }
+-
+-void LIRGenerator::do_continuation_doYield(Intrinsic* x) {
+-  fatal("Continuation.doYield intrinsic is not implemented on this platform");
+-}
+diff --git a/src/hotspot/cpu/sparc/c1_MacroAssembler_sparc.cpp b/src/hotspot/cpu/sparc/c1_MacroAssembler_sparc.cpp
+index 6f2dc90..9d14318 100644
+--- a/src/hotspot/cpu/sparc/c1_MacroAssembler_sparc.cpp
++++ b/src/hotspot/cpu/sparc/c1_MacroAssembler_sparc.cpp
+@@ -150,13 +150,11 @@ void C1_MacroAssembler::try_allocate(
+   Register t2,                         // temp register
+   Label&   slow_case                   // continuation point if fast allocation fails
+ ) {
+-  RegisterOrConstant size_in_bytes = var_size_in_bytes->is_valid()
+-    ? RegisterOrConstant(var_size_in_bytes) : RegisterOrConstant(con_size_in_bytes);
+   if (UseTLAB) {
+     tlab_allocate(obj, var_size_in_bytes, con_size_in_bytes, t1, slow_case);
+   } else {
+-    eden_allocate(obj, var_size_in_bytes, con_size_in_bytes, t1, t2, slow_case);
+-    incr_allocated_bytes(size_in_bytes, t1, t2);
++    ba(slow_case);
++    delayed()->nop();
+   }
+ }
+ 
+@@ -320,11 +318,7 @@ void C1_MacroAssembler::allocate_array(
+   and3(arr_size, ~MinObjAlignmentInBytesMask, arr_size);                     // align array size
+ 
+   // allocate space & initialize header
+-  if (UseTLAB) {
+-    tlab_allocate(obj, arr_size, 0, t2, slow_case);
+-  } else {
+-    eden_allocate(obj, arr_size, 0, t2, t3, slow_case);
+-  }
++  try_allocate(obj, arr_size, 0, t2, t3, slow_case);
+   initialize_header(obj, klass, len, t2, t3);
+ 
+   // initialize body
+diff --git a/src/hotspot/cpu/sparc/c1_Runtime1_sparc.cpp b/src/hotspot/cpu/sparc/c1_Runtime1_sparc.cpp
+index 62e2d8a..852007d 100644
+--- a/src/hotspot/cpu/sparc/c1_Runtime1_sparc.cpp
++++ b/src/hotspot/cpu/sparc/c1_Runtime1_sparc.cpp
+@@ -410,64 +410,6 @@ OopMapSet* Runtime1::generate_code_for(StubID id, StubAssembler* sasm) {
+           __ set_info("fast new_instance init check", dont_gc_arguments);
+         }
+ 
+-        // If TLAB is disabled, see if there is support for inlining contiguous
+-        // allocations.
+-        // Otherwise, just go to the slow path.
+-        if ((id == fast_new_instance_id || id == fast_new_instance_init_check_id) &&
+-            !UseTLAB && Universe::heap()->supports_inline_contig_alloc()) {
+-          Label slow_path;
+-          Register G1_obj_size = G1;
+-          Register G3_t1 = G3;
+-          Register G4_t2 = G4;
+-          assert_different_registers(G5_klass, G1_obj_size, G3_t1, G4_t2);
+-
+-          // Push a frame since we may do dtrace notification for the
+-          // allocation which requires calling out and we don't want
+-          // to stomp the real return address.
+-          __ save_frame(0);
+-
+-          if (id == fast_new_instance_init_check_id) {
+-            // make sure the klass is initialized
+-            __ ldub(G5_klass, in_bytes(InstanceKlass::init_state_offset()), G3_t1);
+-            __ cmp(G3_t1, InstanceKlass::fully_initialized);
+-            __ br(Assembler::notEqual, false, Assembler::pn, slow_path);
+-            __ delayed()->nop();
+-          }
+-#ifdef ASSERT
+-          // assert object can be fast path allocated
+-          {
+-            Label ok, not_ok;
+-          __ ld(G5_klass, in_bytes(Klass::layout_helper_offset()), G1_obj_size);
+-          // make sure it's an instance (LH > 0)
+-          __ cmp_and_br_short(G1_obj_size, 0, Assembler::lessEqual, Assembler::pn, not_ok);
+-          __ btst(Klass::_lh_instance_slow_path_bit, G1_obj_size);
+-          __ br(Assembler::zero, false, Assembler::pn, ok);
+-          __ delayed()->nop();
+-          __ bind(not_ok);
+-          __ stop("assert(can be fast path allocated)");
+-          __ should_not_reach_here();
+-          __ bind(ok);
+-          }
+-#endif // ASSERT
+-
+-          // If we got here then the TLAB allocation failed, so try allocating directly from eden.
+-          // get the instance size
+-          __ ld(G5_klass, in_bytes(Klass::layout_helper_offset()), G1_obj_size);
+-          __ eden_allocate(O0_obj, G1_obj_size, 0, G3_t1, G4_t2, slow_path);
+-          __ incr_allocated_bytes(G1_obj_size, G3_t1, G4_t2);
+-
+-          __ initialize_object(O0_obj, G5_klass, G1_obj_size, 0, G3_t1, G4_t2, /* is_tlab_allocated */ false);
+-          __ verify_oop(O0_obj);
+-          __ mov(O0, I0);
+-          __ ret();
+-          __ delayed()->restore();
+-
+-          __ bind(slow_path);
+-
+-          // pop this frame so generate_stub_call can push it's own
+-          __ restore();
+-        }
+-
+         oop_maps = generate_stub_call(sasm, I0, CAST_FROM_FN_PTR(address, new_instance), G5_klass);
+         // I0->O0: new instance
+       }
+diff --git a/src/hotspot/cpu/sparc/c2_MacroAssembler_sparc.hpp b/src/hotspot/cpu/sparc/c2_MacroAssembler_sparc.hpp
+index 2388ecf..d5dedb8 100644
+--- a/src/hotspot/cpu/sparc/c2_MacroAssembler_sparc.hpp
++++ b/src/hotspot/cpu/sparc/c2_MacroAssembler_sparc.hpp
+@@ -28,6 +28,9 @@
+ // C2_MacroAssembler contains high-level macros for C2
+ 
+  public:
++  void emit_entry_barrier_stub(C2EntryBarrierStub* stub) {}
++  static int entry_barrier_stub_size() { return 0; }
++
+   // Compress char[] to byte[] by compressing 16 bytes at once. Return 0 on failure.
+   void string_compress_16(Register src, Register dst, Register cnt, Register result,
+                           Register tmp1, Register tmp2, Register tmp3, Register tmp4,
+diff --git a/src/hotspot/cpu/sparc/codeBuffer_sparc.hpp b/src/hotspot/cpu/sparc/codeBuffer_sparc.hpp
+index 14011d6..8b9048d 100644
+--- a/src/hotspot/cpu/sparc/codeBuffer_sparc.hpp
++++ b/src/hotspot/cpu/sparc/codeBuffer_sparc.hpp
+@@ -27,8 +27,15 @@
+ 
+ private:
+   void pd_initialize() {}
++  bool pd_finalize_stubs() {
++    if (_finalize_stubs) {
++      Unimplemented();
++    }
++    return true;
++  }
+ 
+ public:
+   void flush_bundle(bool start_new_bundle) {}
++  static constexpr bool supports_shared_stubs() { return false; }
+ 
+ #endif // CPU_SPARC_CODEBUFFER_SPARC_HPP
+diff --git a/src/hotspot/cpu/sparc/continuationEntry_sparc.hpp b/src/hotspot/cpu/sparc/continuationEntry_sparc.hpp
+new file mode 100644
+index 0000000..b98eb4f
+--- /dev/null
++++ b/src/hotspot/cpu/sparc/continuationEntry_sparc.hpp
+@@ -0,0 +1,32 @@
++/*
++ * Copyright (c) 2022 SAP SE. All rights reserved.
++ * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
++ *
++ * This code is free software; you can redistribute it and/or modify it
++ * under the terms of the GNU General Public License version 2 only, as
++ * published by the Free Software Foundation.
++ *
++ * This code is distributed in the hope that it will be useful, but WITHOUT
++ * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
++ * FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
++ * version 2 for more details (a copy is included in the LICENSE file that
++ * accompanied this code).
++ *
++ * You should have received a copy of the GNU General Public License version
++ * 2 along with this work; if not, write to the Free Software Foundation,
++ * Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301 USA.
++ *
++ * Please contact Oracle, 500 Oracle Parkway, Redwood Shores, CA 94065 USA
++ * or visit www.oracle.com if you need additional information or have any
++ * questions.
++ *
++ */
++
++#ifndef CPU_SPARC_CONTINUATIONENTRY_SPARC_HPP
++#define CPU_SPARC_CONTINUATIONENTRY_SPARC_HPP
++
++class ContinuationEntryPD {
++  // empty
++};
++
++#endif // CPU_SPARC_CONTINUATIONENTRY_SPARC_HPP
+diff --git a/src/hotspot/cpu/sparc/continuationFreezeThaw_sparc.inline.hpp b/src/hotspot/cpu/sparc/continuationFreezeThaw_sparc.inline.hpp
+index 57f5a47..a0fb892 100644
+--- a/src/hotspot/cpu/sparc/continuationFreezeThaw_sparc.inline.hpp
++++ b/src/hotspot/cpu/sparc/continuationFreezeThaw_sparc.inline.hpp
+@@ -87,7 +87,8 @@ inline void ThawBase::patch_pd(frame& f, const frame& caller) {
+   Unimplemented();
+ }
+ 
+-void ThawBase::patch_chunk_pd(intptr_t* sp) {
++template <typename ConfigT>
++inline void Thaw<ConfigT>::patch_caller_links(intptr_t* sp, intptr_t* bottom) {
+   Unimplemented();
+ }
+ 
+diff --git a/src/hotspot/cpu/sparc/continuationHelper_sparc.inline.hpp b/src/hotspot/cpu/sparc/continuationHelper_sparc.inline.hpp
+index 2777505..9bba6ca 100644
+--- a/src/hotspot/cpu/sparc/continuationHelper_sparc.inline.hpp
++++ b/src/hotspot/cpu/sparc/continuationHelper_sparc.inline.hpp
+@@ -89,7 +89,7 @@ inline address* ContinuationHelper::InterpretedFrame::return_pc_address(const fr
+   return NULL;
+ }
+ 
+-inline void ContinuationHelper::InterpretedFrame::patch_sender_sp(frame& f, intptr_t* sp) {
++inline void ContinuationHelper::InterpretedFrame::patch_sender_sp(frame& f, const frame& caller) {
+   Unimplemented();
+ }
+ 
+@@ -122,4 +122,9 @@ inline intptr_t* ContinuationHelper::InterpretedFrame::frame_top(const frame& f,
+   return NULL;
+ }
+ 
++inline intptr_t* ContinuationHelper::InterpretedFrame::callers_sp(const frame& f) {
++  Unimplemented();
++  return NULL;
++}
++
+ #endif // CPU_SPARC_CONTINUATIONHELPER_SPARC_INLINE_HPP
+diff --git a/src/hotspot/cpu/sparc/downcallLinker_sparc.cpp b/src/hotspot/cpu/sparc/downcallLinker_sparc.cpp
+index af69f2a..37b6f43 100644
+--- a/src/hotspot/cpu/sparc/downcallLinker_sparc.cpp
++++ b/src/hotspot/cpu/sparc/downcallLinker_sparc.cpp
+@@ -1,4 +1,5 @@
+ /*
++ * Copyright (c) 2022, Oracle and/or its affiliates. All rights reserved.
+  * Copyright (c) 2020, Red Hat, Inc. All rights reserved.
+  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+  *
+@@ -29,9 +30,10 @@ RuntimeStub* DowncallLinker::make_downcall_stub(BasicType* signature,
+                                                 int num_args,
+                                                 BasicType ret_bt,
+                                                 const ABIDescriptor& abi,
+-                                                const GrowableArray<VMReg>& input_registers,
+-                                                const GrowableArray<VMReg>& output_registers,
+-                                                bool needs_return_buffer) {
++                                                const GrowableArray<VMStorage>& input_registers,
++                                                const GrowableArray<VMStorage>& output_registers,
++                                                bool needs_return_buffer,
++                                                int captured_state_mask) {
+   Unimplemented();
+   return nullptr;
+ }
+diff --git a/src/hotspot/cpu/sparc/foreignGlobals_sparc.cpp b/src/hotspot/cpu/sparc/foreignGlobals_sparc.cpp
+index 918e89f..5438cbe 100644
+--- a/src/hotspot/cpu/sparc/foreignGlobals_sparc.cpp
++++ b/src/hotspot/cpu/sparc/foreignGlobals_sparc.cpp
+@@ -1,4 +1,5 @@
+ /*
++ * Copyright (c) 2022, Oracle and/or its affiliates. All rights reserved.
+  * Copyright (c) 2020, Red Hat, Inc. All rights reserved.
+  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+  *
+@@ -33,24 +34,19 @@ const ABIDescriptor ForeignGlobals::parse_abi_descriptor(jobject jabi) {
+   return {};
+ }
+ 
+-VMReg ForeignGlobals::vmstorage_to_vmreg(int type, int index) {
+-  Unimplemented();
+-  return VMRegImpl::Bad();
+-}
+-
+-int RegSpiller::pd_reg_size(VMReg reg) {
++int RegSpiller::pd_reg_size(VMStorage reg) {
+   Unimplemented();
+   return -1;
+ }
+ 
+-void RegSpiller::pd_store_reg(MacroAssembler* masm, int offset, VMReg reg) {
++void RegSpiller::pd_store_reg(MacroAssembler* masm, int offset, VMStorage reg) {
+   Unimplemented();
+ }
+ 
+-void RegSpiller::pd_load_reg(MacroAssembler* masm, int offset, VMReg reg) {
++void RegSpiller::pd_load_reg(MacroAssembler* masm, int offset, VMStorage reg) {
+   Unimplemented();
+ }
+ 
+-void ArgumentShuffle::pd_generate(MacroAssembler* masm, VMReg tmp, int in_stk_bias, int out_stk_bias) const {
++void ArgumentShuffle::pd_generate(MacroAssembler* masm, VMStorage tmp, int in_stk_bias, int out_stk_bias, const StubLocations& locs) const {
+   Unimplemented();
+ }
+diff --git a/src/hotspot/cpu/sparc/frame_sparc.cpp b/src/hotspot/cpu/sparc/frame_sparc.cpp
+index 699ec12..eb8a6c3 100644
+--- a/src/hotspot/cpu/sparc/frame_sparc.cpp
++++ b/src/hotspot/cpu/sparc/frame_sparc.cpp
+@@ -231,16 +231,11 @@ bool frame::safe_for_sender(JavaThread *thread) {
+ 
+ 
+     // We must always be able to find a recognizable pc
+-    CodeBlob* sender_blob = CodeCache::find_blob_unsafe(sender_pc);
++    CodeBlob* sender_blob = CodeCache::find_blob(sender_pc);
+     if (sender_pc == NULL ||  sender_blob == NULL) {
+       return false;
+     }
+ 
+-    // Could be a zombie method
+-    if (sender_blob->is_zombie() || sender_blob->is_unloaded()) {
+-      return false;
+-    }
+-
+     // It should be safe to construct the sender though it might not be valid
+ 
+     frame sender(_SENDER_SP, younger_sp, adjusted_stack);
+diff --git a/src/hotspot/cpu/sparc/frame_sparc.hpp b/src/hotspot/cpu/sparc/frame_sparc.hpp
+index b024f60..85e6d3c 100644
+--- a/src/hotspot/cpu/sparc/frame_sparc.hpp
++++ b/src/hotspot/cpu/sparc/frame_sparc.hpp
+@@ -25,7 +25,6 @@
+ #ifndef CPU_SPARC_FRAME_SPARC_HPP
+ #define CPU_SPARC_FRAME_SPARC_HPP
+ 
+-#include "runtime/synchronizer.hpp"
+ 
+ // A frame represents a physical stack frame (an activation).  Frames can be
+ // C or Java frames, and the Java frames can be interpreted or compiled.
+@@ -113,6 +112,8 @@
+     varargs_offset                               = memory_parameter_word_sp_offset,
+ 
+     metadata_words                               = 0,
++    metadata_words_at_bottom                     = 0,
++    metadata_words_at_top                        = 0,
+     frame_alignment                              = 16,
+     // size, in words, of maximum shift in frame position due to alignment
+     align_wiggle                                 = 1
+@@ -242,8 +243,6 @@
+ 
+   static jint interpreter_frame_expression_stack_direction() { return -1; }
+ 
+-  inline intptr_t* interpreter_frame_last_sp() const;
+-
+   template <typename RegisterMapT>
+   static void update_map_with_saved_link(RegisterMapT* map, intptr_t** link_addr);
+ 
+diff --git a/src/hotspot/cpu/sparc/frame_sparc.inline.hpp b/src/hotspot/cpu/sparc/frame_sparc.inline.hpp
+index d99f9d5..1fa77f7 100644
+--- a/src/hotspot/cpu/sparc/frame_sparc.inline.hpp
++++ b/src/hotspot/cpu/sparc/frame_sparc.inline.hpp
+@@ -214,11 +214,6 @@ inline void frame::interpreted_frame_oop_map(InterpreterOopMap* mask) const {
+   Unimplemented();
+ }
+ 
+-inline intptr_t* frame::interpreter_frame_last_sp() const {
+-  Unimplemented();
+-  return NULL;
+-}
+-
+ inline int frame::sender_sp_ret_address_offset() {
+   Unimplemented();
+   return 0;
+@@ -248,7 +243,7 @@ inline frame frame::sender_for_compiled_frame(RegisterMap *map) const {
+ inline frame frame::sender(RegisterMap* map) const {
+   assert(map != NULL, "map must be set");
+ 
+-  assert(CodeCache::find_blob_unsafe(_pc) == _cb, "inconsistent");
++  assert(CodeCache::find_blob(_pc) == _cb, "inconsistent");
+ 
+   // Default is not to follow arguments; update it accordingly below
+   map->set_include_argument_oops(false);
+diff --git a/src/hotspot/cpu/sparc/interp_masm_sparc.cpp b/src/hotspot/cpu/sparc/interp_masm_sparc.cpp
+index 56e220a..07a6473 100644
+--- a/src/hotspot/cpu/sparc/interp_masm_sparc.cpp
++++ b/src/hotspot/cpu/sparc/interp_masm_sparc.cpp
+@@ -39,7 +39,7 @@
+ #include "runtime/frame.inline.hpp"
+ #include "runtime/safepointMechanism.hpp"
+ #include "runtime/sharedRuntime.hpp"
+-#include "runtime/thread.inline.hpp"
++#include "runtime/javaThread.hpp"
+ #include "utilities/align.hpp"
+ #include "utilities/powerOfTwo.hpp"
+ 
+@@ -2295,7 +2295,7 @@ void InterpreterMacroAssembler::get_method_counters(Register method,
+ }
+ 
+ void InterpreterMacroAssembler::increment_invocation_counter( Register Rcounters, Register Rtmp, Register Rtmp2 ) {
+-  assert(UseCompiler || LogTouchedMethods, "incrementing must be useful");
++  assert(UseCompiler, "incrementing must be useful");
+   assert_different_registers(Rcounters, Rtmp, Rtmp2);
+ 
+   Address inv_counter(Rcounters, MethodCounters::invocation_counter_offset() +
+diff --git a/src/hotspot/cpu/sparc/macroAssembler_sparc.cpp b/src/hotspot/cpu/sparc/macroAssembler_sparc.cpp
+index 6767260..8291b52 100644
+--- a/src/hotspot/cpu/sparc/macroAssembler_sparc.cpp
++++ b/src/hotspot/cpu/sparc/macroAssembler_sparc.cpp
+@@ -2625,90 +2625,6 @@ void MacroAssembler::verify_tlab() {
+ }
+ 
+ 
+-void MacroAssembler::eden_allocate(
+-  Register obj,                        // result: pointer to object after successful allocation
+-  Register var_size_in_bytes,          // object size in bytes if unknown at compile time; invalid otherwise
+-  int      con_size_in_bytes,          // object size in bytes if   known at compile time
+-  Register t1,                         // temp register
+-  Register t2,                         // temp register
+-  Label&   slow_case                   // continuation point if fast allocation fails
+-){
+-  // make sure arguments make sense
+-  assert_different_registers(obj, var_size_in_bytes, t1, t2);
+-  assert(0 <= con_size_in_bytes && Assembler::is_simm13(con_size_in_bytes), "illegal object size");
+-  assert((con_size_in_bytes & MinObjAlignmentInBytesMask) == 0, "object size is not multiple of alignment");
+-
+-  if (!Universe::heap()->supports_inline_contig_alloc()) {
+-    // No allocation in the shared eden.
+-    ba(slow_case);
+-    delayed()->nop();
+-  } else {
+-    // get eden boundaries
+-    // note: we need both top & top_addr!
+-    const Register top_addr = t1;
+-    const Register end      = t2;
+-
+-    CollectedHeap* ch = Universe::heap();
+-    set((intx)ch->top_addr(), top_addr);
+-    intx delta = (intx)ch->end_addr() - (intx)ch->top_addr();
+-    ld_ptr(top_addr, delta, end);
+-    ld_ptr(top_addr, 0, obj);
+-
+-    // try to allocate
+-    Label retry;
+-    bind(retry);
+-#ifdef ASSERT
+-    // make sure eden top is properly aligned
+-    {
+-      Label L;
+-      btst(MinObjAlignmentInBytesMask, obj);
+-      br(Assembler::zero, false, Assembler::pt, L);
+-      delayed()->nop();
+-      STOP("eden top is not properly aligned");
+-      bind(L);
+-    }
+-#endif // ASSERT
+-    const Register free = end;
+-    sub(end, obj, free);                                   // compute amount of free space
+-    if (var_size_in_bytes->is_valid()) {
+-      // size is unknown at compile time
+-      cmp(free, var_size_in_bytes);
+-      brx(Assembler::lessUnsigned, false, Assembler::pn, slow_case); // if there is not enough space go the slow case
+-      delayed()->add(obj, var_size_in_bytes, end);
+-    } else {
+-      // size is known at compile time
+-      cmp(free, con_size_in_bytes);
+-      brx(Assembler::lessUnsigned, false, Assembler::pn, slow_case); // if there is not enough space go the slow case
+-      delayed()->add(obj, con_size_in_bytes, end);
+-    }
+-    // Compare obj with the value at top_addr; if still equal, swap the value of
+-    // end with the value at top_addr. If not equal, read the value at top_addr
+-    // into end.
+-    cas_ptr(top_addr, obj, end);
+-    // if someone beat us on the allocation, try again, otherwise continue
+-    cmp(obj, end);
+-    brx(Assembler::notEqual, false, Assembler::pn, retry);
+-    delayed()->mov(end, obj);                              // nop if successfull since obj == end
+-
+-#ifdef ASSERT
+-    // make sure eden top is properly aligned
+-    {
+-      Label L;
+-      const Register top_addr = t1;
+-
+-      set((intx)ch->top_addr(), top_addr);
+-      ld_ptr(top_addr, 0, top_addr);
+-      btst(MinObjAlignmentInBytesMask, top_addr);
+-      br(Assembler::zero, false, Assembler::pt, L);
+-      delayed()->nop();
+-      STOP("eden top is not properly aligned");
+-      bind(L);
+-    }
+-#endif // ASSERT
+-  }
+-}
+-
+-
+ void MacroAssembler::tlab_allocate(
+   Register obj,                        // result: pointer to object after successful allocation
+   Register var_size_in_bytes,          // object size in bytes if unknown at compile time; invalid otherwise
+@@ -2954,7 +2870,7 @@ void MacroAssembler::store_klass_gap(Register s, Register d) {
+ void MacroAssembler::access_store_at(BasicType type, DecoratorSet decorators,
+                                      Register src, Address dst, Register tmp) {
+   BarrierSetAssembler* bs = BarrierSet::barrier_set()->barrier_set_assembler();
+-  decorators = AccessInternal::decorator_fixup(decorators);
++  decorators = AccessInternal::decorator_fixup(decorators, type);
+   bool as_raw = (decorators & AS_RAW) != 0;
+   if (as_raw) {
+     bs->BarrierSetAssembler::store_at(this, decorators, type, src, dst, tmp);
+@@ -2966,7 +2882,7 @@ void MacroAssembler::access_store_at(BasicType type, DecoratorSet decorators,
+ void MacroAssembler::access_load_at(BasicType type, DecoratorSet decorators,
+                                     Address src, Register dst, Register tmp) {
+   BarrierSetAssembler* bs = BarrierSet::barrier_set()->barrier_set_assembler();
+-  decorators = AccessInternal::decorator_fixup(decorators);
++  decorators = AccessInternal::decorator_fixup(decorators, type);
+   bool as_raw = (decorators & AS_RAW) != 0;
+   if (as_raw) {
+     bs->BarrierSetAssembler::load_at(this, decorators, type, src, dst, tmp);
+diff --git a/src/hotspot/cpu/sparc/macroAssembler_sparc.hpp b/src/hotspot/cpu/sparc/macroAssembler_sparc.hpp
+index e448a3f..dbef4cf 100644
+--- a/src/hotspot/cpu/sparc/macroAssembler_sparc.hpp
++++ b/src/hotspot/cpu/sparc/macroAssembler_sparc.hpp
+@@ -1158,14 +1158,6 @@ public:
+                               Register Rscratch);
+ 
+   // allocation
+-  void eden_allocate(
+-    Register obj,                      // result: pointer to object after successful allocation
+-    Register var_size_in_bytes,        // object size in bytes if unknown at compile time; invalid otherwise
+-    int      con_size_in_bytes,        // object size in bytes if   known at compile time
+-    Register t1,                       // temp register
+-    Register t2,                       // temp register
+-    Label&   slow_case                 // continuation point if fast allocation fails
+-  );
+   void tlab_allocate(
+     Register obj,                      // result: pointer to object after successful allocation
+     Register var_size_in_bytes,        // object size in bytes if unknown at compile time; invalid otherwise
+diff --git a/src/hotspot/cpu/sparc/smallRegisterMap_sparc.inline.hpp b/src/hotspot/cpu/sparc/smallRegisterMap_sparc.inline.hpp
+index 1de9d60..a47215a 100644
+--- a/src/hotspot/cpu/sparc/smallRegisterMap_sparc.inline.hpp
++++ b/src/hotspot/cpu/sparc/smallRegisterMap_sparc.inline.hpp
+@@ -33,7 +33,7 @@ class SmallRegisterMap {
+ public:
+   static constexpr SmallRegisterMap* instance = nullptr;
+ private:
+-  static void assert_is_rfp(VMReg r) PRODUCT_RETURN
++  static void assert_is_rfp(VMReg r) NOT_DEBUG_RETURN
+                                      DEBUG_ONLY({ Unimplemented(); })
+ public:
+   // as_RegisterMap is used when we didn't want to templatize and abstract over RegisterMap type to support SmallRegisterMap
+diff --git a/src/hotspot/cpu/sparc/sparc.ad b/src/hotspot/cpu/sparc/sparc.ad
+index 29a067c..399192e 100644
+--- a/src/hotspot/cpu/sparc/sparc.ad
++++ b/src/hotspot/cpu/sparc/sparc.ad
+@@ -815,7 +815,6 @@ void emit_form3_mem_reg(CodeBuffer &cbuf, PhaseRegAlloc* ra, const MachNode* n,
+       // a Load
+       // inputs are (0:control, 1:memory, 2:address)
+       if (!(n->ideal_Opcode()==ld_op)       && // Following are special cases
+-          !(n->ideal_Opcode()==Op_LoadPLocked && ld_op==Op_LoadP) &&
+           !(n->ideal_Opcode()==Op_LoadI     && ld_op==Op_LoadF) &&
+           !(n->ideal_Opcode()==Op_LoadF     && ld_op==Op_LoadI) &&
+           !(n->ideal_Opcode()==Op_LoadRange && ld_op==Op_LoadI) &&
+@@ -1626,6 +1625,14 @@ const bool Matcher::match_rule_supported_vector(int opcode, int vlen, BasicType
+   return ret_value;  // Per default match rules are supported.
+ }
+ 
++const bool Matcher::match_rule_supported_superword(int opcode, int vlen, BasicType bt) {
++  return match_rule_supported_vector(opcode, vlen, bt);
++}
++
++const bool Matcher::vector_needs_partial_operations(Node* node, const TypeVect* vt) {
++  return false;
++}
++
+ const bool Matcher::match_rule_supported_vector_masked(int opcode, int vlen, BasicType bt) {
+   return false;
+ }
+@@ -6725,51 +6732,6 @@ instruct addL_reg_imm13(iRegL dst, iRegL src1, immL13 con) %{
+   ins_pipe(ialu_reg_imm);
+ %}
+ 
+-//----------Conditional_store--------------------------------------------------
+-// Conditional-store of the updated heap-top.
+-// Used during allocation of the shared heap.
+-// Sets flags (EQ) on success.  Implemented with a CASA on Sparc.
+-
+-// LoadP-locked.  Same as a regular pointer load when used with a compare-swap
+-instruct loadPLocked(iRegP dst, memory mem) %{
+-  match(Set dst (LoadPLocked mem));
+-  ins_cost(MEMORY_REF_COST);
+-
+-  format %{ "LDX    $mem,$dst\t! ptr" %}
+-  opcode(Assembler::ldx_op3, 0, REGP_OP);
+-  ins_encode( form3_mem_reg( mem, dst ) );
+-  ins_pipe(iload_mem);
+-%}
+-
+-instruct storePConditional( iRegP heap_top_ptr, iRegP oldval, g3RegP newval, flagsRegP pcc ) %{
+-  match(Set pcc (StorePConditional heap_top_ptr (Binary oldval newval)));
+-  effect( KILL newval );
+-  format %{ "CASA   [$heap_top_ptr],$oldval,R_G3\t! If $oldval==[$heap_top_ptr] Then store R_G3 into [$heap_top_ptr], set R_G3=[$heap_top_ptr] in any case\n\t"
+-            "CMP    R_G3,$oldval\t\t! See if we made progress"  %}
+-  ins_encode( enc_cas(heap_top_ptr,oldval,newval) );
+-  ins_pipe( long_memory_op );
+-%}
+-
+-// Conditional-store of an int value.
+-instruct storeIConditional( iRegP mem_ptr, iRegI oldval, g3RegI newval, flagsReg icc ) %{
+-  match(Set icc (StoreIConditional mem_ptr (Binary oldval newval)));
+-  effect( KILL newval );
+-  format %{ "CASA   [$mem_ptr],$oldval,$newval\t! If $oldval==[$mem_ptr] Then store $newval into [$mem_ptr], set $newval=[$mem_ptr] in any case\n\t"
+-            "CMP    $oldval,$newval\t\t! See if we made progress"  %}
+-  ins_encode( enc_cas(mem_ptr,oldval,newval) );
+-  ins_pipe( long_memory_op );
+-%}
+-
+-// Conditional-store of a long value.
+-instruct storeLConditional( iRegP mem_ptr, iRegL oldval, g3RegL newval, flagsRegL xcc ) %{
+-  match(Set xcc (StoreLConditional mem_ptr (Binary oldval newval)));
+-  effect( KILL newval );
+-  format %{ "CASXA  [$mem_ptr],$oldval,$newval\t! If $oldval==[$mem_ptr] Then store $newval into [$mem_ptr], set $newval=[$mem_ptr] in any case\n\t"
+-            "CMP    $oldval,$newval\t\t! See if we made progress"  %}
+-  ins_encode( enc_cas(mem_ptr,oldval,newval) );
+-  ins_pipe( long_memory_op );
+-%}
+-
+ // No flag versions for CompareAndSwap{P,I,L} because matcher can't match them
+ 
+ instruct compareAndSwapL_bool(iRegP mem_ptr, iRegL oldval, iRegL newval, iRegI res, o7RegI tmp1, flagsReg ccr ) %{
+diff --git a/src/hotspot/cpu/sparc/stackChunkFrameStream_sparc.inline.hpp b/src/hotspot/cpu/sparc/stackChunkFrameStream_sparc.inline.hpp
+index 55d593a..cb2a4a7 100644
+--- a/src/hotspot/cpu/sparc/stackChunkFrameStream_sparc.inline.hpp
++++ b/src/hotspot/cpu/sparc/stackChunkFrameStream_sparc.inline.hpp
+@@ -67,12 +67,6 @@ inline intptr_t* StackChunkFrameStream<frame_kind>::unextended_sp_for_interprete
+   return NULL;
+ }
+ 
+-template <ChunkFrames frame_kind>
+-intptr_t* StackChunkFrameStream<frame_kind>::next_sp_for_interpreter_frame() const {
+-  Unimplemented();
+-  return NULL;
+-}
+-
+ template <ChunkFrames frame_kind>
+ inline void StackChunkFrameStream<frame_kind>::next_for_interpreter_frame() {
+   Unimplemented();
+diff --git a/src/hotspot/cpu/sparc/stubGenerator_sparc.cpp b/src/hotspot/cpu/sparc/stubGenerator_sparc.cpp
+index b46d5f0..e737707 100644
+--- a/src/hotspot/cpu/sparc/stubGenerator_sparc.cpp
++++ b/src/hotspot/cpu/sparc/stubGenerator_sparc.cpp
+@@ -38,7 +38,7 @@
+ #include "runtime/sharedRuntime.hpp"
+ #include "runtime/stubCodeGenerator.hpp"
+ #include "runtime/stubRoutines.hpp"
+-#include "runtime/thread.inline.hpp"
++#include "runtime/javaThread.hpp"
+ #ifdef COMPILER2
+ #include "opto/runtime.hpp"
+ #endif
+diff --git a/src/hotspot/cpu/sparc/stubRoutines_sparc.cpp b/src/hotspot/cpu/sparc/stubRoutines_sparc.cpp
+index 63cbcf0..3e48194 100644
+--- a/src/hotspot/cpu/sparc/stubRoutines_sparc.cpp
++++ b/src/hotspot/cpu/sparc/stubRoutines_sparc.cpp
+@@ -26,7 +26,7 @@
+ #include "runtime/deoptimization.hpp"
+ #include "runtime/frame.inline.hpp"
+ #include "runtime/stubRoutines.hpp"
+-#include "runtime/thread.inline.hpp"
++#include "runtime/javaThread.hpp"
+ 
+ // Implementation of the platform-specific part of StubRoutines - for
+ // a description of how to extend it, see the stubRoutines.hpp file.
+diff --git a/src/hotspot/cpu/sparc/templateInterpreterGenerator_sparc.cpp b/src/hotspot/cpu/sparc/templateInterpreterGenerator_sparc.cpp
+index 4758c40..24effa1 100644
+--- a/src/hotspot/cpu/sparc/templateInterpreterGenerator_sparc.cpp
++++ b/src/hotspot/cpu/sparc/templateInterpreterGenerator_sparc.cpp
+@@ -38,7 +38,6 @@
+ #include "prims/jvmtiExport.hpp"
+ #include "prims/jvmtiThreadState.hpp"
+ #include "runtime/arguments.hpp"
+-#include "runtime/continuation.hpp"
+ #include "runtime/deoptimization.hpp"
+ #include "runtime/frame.inline.hpp"
+ #include "runtime/jniHandles.hpp"
+@@ -798,12 +797,6 @@ void TemplateInterpreterGenerator::generate_fixed_frame(bool native_call) {
+ }
+ 
+ // Method entry for java.lang.ref.Reference.get.
+-address TemplateInterpreterGenerator::generate_Continuation_doYield_entry(void) {
+-  if (!Continuations::enabled()) return nullptr;
+-  Unimplemented();
+-  return NULL;
+-}
+-
+ address TemplateInterpreterGenerator::generate_Reference_get_entry(void) {
+   // Code: _aload_0, _getfield, _areturn
+   // parameter size = 1
+@@ -997,6 +990,10 @@ address TemplateInterpreterGenerator::generate_CRC32C_updateBytes_entry(Abstract
+   return NULL;
+ }
+ 
++// Not supported
++address TemplateInterpreterGenerator::generate_Float_float16ToFloat_entry() { return nullptr; }
++address TemplateInterpreterGenerator::generate_Float_floatToFloat16_entry() { return nullptr; }
++
+ /* Math routines only partially supported.
+  *
+  *   Providing support for fma (float/double) only.
+@@ -1086,7 +1083,7 @@ address TemplateInterpreterGenerator::generate_native_entry(bool synchronized) {
+   // the following temporary registers are used during frame creation
+   const Register Gtmp1 = G3_scratch ;
+   const Register Gtmp2 = G1_scratch;
+-  bool inc_counter  = UseCompiler || CountCompiledCalls || LogTouchedMethods;
++  bool inc_counter  = UseCompiler || CountCompiledCalls;
+ 
+   // make sure registers are different!
+   assert_different_registers(G2_thread, G5_method, Gargs, Gtmp1, Gtmp2);
+@@ -1464,7 +1461,7 @@ address TemplateInterpreterGenerator::generate_native_entry(bool synchronized) {
+ address TemplateInterpreterGenerator::generate_normal_entry(bool synchronized) {
+   address entry = __ pc();
+ 
+-  bool inc_counter  = UseCompiler || CountCompiledCalls || LogTouchedMethods;
++  bool inc_counter  = UseCompiler || CountCompiledCalls;
+ 
+   // the following temporary registers are used during frame creation
+   const Register Gtmp1 = G3_scratch ;
+diff --git a/src/hotspot/cpu/sparc/templateTable_sparc.cpp b/src/hotspot/cpu/sparc/templateTable_sparc.cpp
+index 4dc5791..3e5b5f9 100644
+--- a/src/hotspot/cpu/sparc/templateTable_sparc.cpp
++++ b/src/hotspot/cpu/sparc/templateTable_sparc.cpp
+@@ -249,11 +249,11 @@ void TemplateTable::sipush() {
+   __ get_2_byte_integer_at_bcp(1, G3_scratch, Otos_i, InterpreterMacroAssembler::Signed);
+ }
+ 
+-void TemplateTable::ldc(bool wide) {
++void TemplateTable::ldc(LdcType type) {
+   transition(vtos, vtos);
+   Label call_ldc, notInt, isString, notString, notClass, notFloat, exit;
+ 
+-  if (wide) {
++  if (is_ldc_wide(type)) {
+     __ get_2_byte_integer_at_bcp(1, G3_scratch, O1, InterpreterMacroAssembler::Unsigned);
+   } else {
+     __ ldub(Lbcp, 1, O1);
+@@ -278,7 +278,7 @@ void TemplateTable::ldc(bool wide) {
+   __ delayed()->add(O0, base_offset, O0);
+ 
+   __ bind(call_ldc);
+-  __ set(wide, O1);
++  __ set(is_ldc_wide(type) ? 1 : 0, O1);
+   call_VM(Otos_i, CAST_FROM_FN_PTR(address, InterpreterRuntime::ldc), O1);
+   __ push(atos);
+   __ ba(exit);
+@@ -323,10 +323,10 @@ void TemplateTable::ldc(bool wide) {
+ // Fast path for caching oop constants.
+ // %%% We should use this to handle Class and String constants also.
+ // %%% It will simplify the ldc/primitive path considerably.
+-void TemplateTable::fast_aldc(bool wide) {
++void TemplateTable::fast_aldc(LdcType type) {
+   transition(vtos, atos);
+ 
+-  int index_size = wide ? sizeof(u2) : sizeof(u1);
++  int index_size = is_ldc_wide(type) ? sizeof(u2) : sizeof(u1);
+   Label resolved;
+ 
+   // We are resolved if the resolved reference cache entry contains a
+@@ -3376,19 +3376,11 @@ void TemplateTable::_new() {
+   //  If TLAB is enabled:
+   //    Try to allocate in the TLAB.
+   //    If fails, go to the slow path.
+-  //  Else If inline contiguous allocations are enabled:
+-  //    Try to allocate in eden.
+-  //    If fails due to heap end, go to slow path.
+-  //
+-  //  If TLAB is enabled OR inline contiguous is enabled:
+   //    Initialize the allocation.
+   //    Exit.
+   //
+   //  Go to slow path.
+ 
+-  const bool allow_shared_alloc =
+-    Universe::heap()->supports_inline_contig_alloc();
+-
+   if(UseTLAB) {
+     Register RoldTopValue = RallocatedObject;
+     Register RtlabWasteLimitValue = G3_scratch;
+@@ -3414,41 +3406,11 @@ void TemplateTable::_new() {
+ 
+     // Allocation does not fit in the TLAB.
+     __ ba_short(slow_case);
+-  } else {
+-    // Allocation in the shared Eden
+-    if (allow_shared_alloc) {
+-      Register RoldTopValue = G1_scratch;
+-      Register RtopAddr = G3_scratch;
+-      Register RnewTopValue = RallocatedObject;
+-      Register RendValue = Rscratch;
+-
+-      __ set((intptr_t)Universe::heap()->top_addr(), RtopAddr);
+-
+-      Label retry;
+-      __ bind(retry);
+-      __ set((intptr_t)Universe::heap()->end_addr(), RendValue);
+-      __ ld_ptr(RendValue, 0, RendValue);
+-      __ ld_ptr(RtopAddr, 0, RoldTopValue);
+-      __ add(RoldTopValue, Roffset, RnewTopValue);
+-
+-      // RnewTopValue contains the top address after the new object
+-      // has been allocated.
+-      __ cmp_and_brx_short(RnewTopValue, RendValue, Assembler::greaterUnsigned, Assembler::pn, slow_case);
+-
+-      __ cas_ptr(RtopAddr, RoldTopValue, RnewTopValue);
+-
+-      // if someone beat us on the allocation, try again, otherwise continue
+-      __ cmp_and_brx_short(RoldTopValue, RnewTopValue, Assembler::notEqual, Assembler::pn, retry);
+-
+-      // bump total bytes allocated by this thread
+-      // RoldTopValue and RtopAddr are dead, so can use G1 and G3
+-      __ incr_allocated_bytes(Roffset, G1_scratch, G3_scratch);
+-    }
+   }
+ 
+-  // If UseTLAB or allow_shared_alloc are true, the object is created above and
+-  // there is an initialize need. Otherwise, skip and go to the slow path.
+-  if (UseTLAB || allow_shared_alloc) {
++  // If UseTLAB is true, the object is created above and there is an
++  // initialize need. Otherwise, skip and go to the slow path.
++  if (UseTLAB) {
+     // clear object fields
+     __ bind(initialize_object);
+     __ deccc(Roffset, sizeof(oopDesc));
+diff --git a/src/hotspot/cpu/sparc/vmstorage_sparc.hpp b/src/hotspot/cpu/sparc/vmstorage_sparc.hpp
+new file mode 100644
+index 0000000..c8531d4
+--- /dev/null
++++ b/src/hotspot/cpu/sparc/vmstorage_sparc.hpp
+@@ -0,0 +1,52 @@
++/*
++ * Copyright (c) 2022, Oracle and/or its affiliates. All rights reserved.
++ * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
++ *
++ * This code is free software; you can redistribute it and/or modify it
++ * under the terms of the GNU General Public License version 2 only, as
++ * published by the Free Software Foundation.
++ *
++ * This code is distributed in the hope that it will be useful, but WITHOUT
++ * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
++ * FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
++ * version 2 for more details (a copy is included in the LICENSE file that
++ * accompanied this code).
++ *
++ * You should have received a copy of the GNU General Public License version
++ * 2 along with this work; if not, write to the Free Software Foundation,
++ * Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301 USA.
++ *
++ * Please contact Oracle, 500 Oracle Parkway, Redwood Shores, CA 94065 USA
++ * or visit www.oracle.com if you need additional information or have any
++ * questions.
++ */
++
++#ifndef CPU_SPARC_VMSTORAGE_SPARC_INLINE_HPP
++#define CPU_SPARC_VMSTORAGE_SPARC_INLINE_HPP
++
++#include <cstdint>
++
++#include "asm/register.hpp"
++
++enum class StorageType : int8_t {
++  STACK = 0,
++  PLACEHOLDER = 1,
++// special locations used only by native code
++  FRAME_DATA = PLACEHOLDER + 1,
++  INVALID = -1
++};
++
++// need to define this before constructing VMStorage (below)
++constexpr inline bool VMStorage::is_reg(StorageType type) {
++   return false;
++}
++constexpr inline StorageType VMStorage::stack_type() { return StorageType::STACK; }
++constexpr inline StorageType VMStorage::placeholder_type() { return StorageType::PLACEHOLDER; }
++constexpr inline StorageType VMStorage::frame_data_type() { return StorageType::FRAME_DATA; }
++
++inline VMStorage as_VMStorage(VMReg reg) {
++  ShouldNotReachHere();
++  return VMStorage::invalid();
++}
++
++#endif // CPU_SPARC_VMSTORAGE_SPARC_INLINE_HPP
+\ No newline at end of file
+diff --git a/src/hotspot/share/opto/convertnode.cpp b/src/hotspot/share/opto/convertnode.cpp
+index 5ed0aaa..79a436a 100644
+--- a/src/hotspot/share/opto/convertnode.cpp
++++ b/src/hotspot/share/opto/convertnode.cpp
+@@ -31,6 +31,7 @@
+ #include "opto/movenode.hpp"
+ #include "opto/phaseX.hpp"
+ #include "opto/subnode.hpp"
++#include "runtime/sharedRuntime.hpp"
+ #include "runtime/stubRoutines.hpp"
+ 
+ //=============================================================================

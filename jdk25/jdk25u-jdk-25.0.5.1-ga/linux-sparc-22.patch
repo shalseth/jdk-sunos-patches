@@ -1,0 +1,41 @@
+diff --git a/src/hotspot/os_cpu/linux_sparc/os_linux_sparc.cpp b/src/hotspot/os_cpu/linux_sparc/os_linux_sparc.cpp
+index df8080d83..bc0bc8dae 100644
+--- a/src/hotspot/os_cpu/linux_sparc/os_linux_sparc.cpp
++++ b/src/hotspot/os_cpu/linux_sparc/os_linux_sparc.cpp
+@@ -224,6 +224,22 @@ void os::print_context(outputStream *st, const void *context) {
+   st->cr();
+ }
+ 
++void os::print_tos_pc(outputStream *st, const void *context) {
++  if (context == nullptr) return;
++
++  intptr_t* sp = nullptr;
++  fetch_frame_from_context(context, &sp, nullptr);
++  print_tos(st, (address)sp);
++  st->cr();
++
++  // Note: it may be unsafe to inspect memory near pc. For example, pc may
++  // point to garbage if entry point in an nmethod is corrupted. Leave
++  // this at the end, and hope for the best.
++  address pc = fetch_frame_from_context(context).pc();
++  print_instructions(st, pc);
++  st->cr();
++}
++
+ void os::print_register_info(outputStream *st, const void *context, int& continuation) {
+   static const char* const names[] = {
+     "G1", "G2", "G3", "G4", "G5", "G6", "G7",
+diff --git a/src/java.base/unix/native/libnio/ch/Net.c b/src/java.base/unix/native/libnio/ch/Net.c
+index 6562da59e..5b3346cda 100644
+--- a/src/java.base/unix/native/libnio/ch/Net.c
++++ b/src/java.base/unix/native/libnio/ch/Net.c
+@@ -25,7 +25,9 @@
+ 
+ #include <poll.h>
+ #include <sys/ioctl.h>
++#ifdef __solaris__
+ #include <sys/filio.h>
++#endif
+ #include <sys/types.h>
+ #include <sys/socket.h>
+ #include <string.h>

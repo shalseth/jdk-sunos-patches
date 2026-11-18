@@ -1,0 +1,141 @@
+diff --git a/src/hotspot/os_cpu/linux_sparc/atomic_linux_sparc.hpp b/src/hotspot/os_cpu/linux_sparc/atomic_linux_sparc.hpp
+index 9f5f98982..9a4543877 100644
+--- a/src/hotspot/os_cpu/linux_sparc/atomic_linux_sparc.hpp
++++ b/src/hotspot/os_cpu/linux_sparc/atomic_linux_sparc.hpp
+@@ -30,17 +30,17 @@
+ template<size_t byte_size>
+ struct Atomic::PlatformAdd {
+   template<typename D, typename I>
+-  D add_and_fetch(D volatile* dest, I add_value, atomic_memory_order order) const;
++  D add_then_fetch(D volatile* dest, I add_value, atomic_memory_order order) const;
+ 
+   template<typename D, typename I>
+-  D fetch_and_add(D volatile* dest, I add_value, atomic_memory_order order) const {
+-    return add_and_fetch(dest, add_value, order) - add_value;
++  D fetch_then_add(D volatile* dest, I add_value, atomic_memory_order order) const {
++    return add_then_fetch(dest, add_value, order) - add_value;
+   }
+ };
+ 
+ template<>
+ template<typename D, typename I>
+-inline D Atomic::PlatformAdd<4>::add_and_fetch(D volatile* dest, I add_value,
++inline D Atomic::PlatformAdd<4>::add_then_fetch(D volatile* dest, I add_value,
+                                                atomic_memory_order order) const {
+   STATIC_ASSERT(4 == sizeof(I));
+   STATIC_ASSERT(4 == sizeof(D));
+@@ -63,7 +63,7 @@ inline D Atomic::PlatformAdd<4>::add_and_fetch(D volatile* dest, I add_value,
+ 
+ template<>
+ template<typename D, typename I>
+-inline D Atomic::PlatformAdd<8>::add_and_fetch(D volatile* dest, I add_value,
++inline D Atomic::PlatformAdd<8>::add_then_fetch(D volatile* dest, I add_value,
+                                                atomic_memory_order order) const {
+   STATIC_ASSERT(8 == sizeof(I));
+   STATIC_ASSERT(8 == sizeof(D));
+diff --git a/src/hotspot/os_cpu/linux_sparc/os_linux_sparc.cpp b/src/hotspot/os_cpu/linux_sparc/os_linux_sparc.cpp
+index a3f0f0a04..df8080d83 100644
+--- a/src/hotspot/os_cpu/linux_sparc/os_linux_sparc.cpp
++++ b/src/hotspot/os_cpu/linux_sparc/os_linux_sparc.cpp
+@@ -224,73 +224,39 @@ void os::print_context(outputStream *st, const void *context) {
+   st->cr();
+ }
+ 
+-void os::print_tos_pc(outputStream *st, const void *context) {
+-  if (context == NULL) return;
+-
+-  const ucontext_t* uc = (const ucontext_t*)context;
+-
+-  address sp = (address)os::Linux::ucontext_get_sp(uc);
+-  print_tos(st, sp);
+-  st->cr();
+-
+-  // Note: it may be unsafe to inspect memory near pc. For example, pc may
+-  // point to garbage if entry point in an nmethod is corrupted. Leave
+-  // this at the end, and hope for the best.
+-  address pc = os::Posix::ucontext_get_pc(uc);
+-  print_instructions(st, pc, sizeof(char));
+-  st->cr();
+-}
+-
+-
+-void os::print_register_info(outputStream *st, const void *context) {
+-  if (context == NULL) return;
++void os::print_register_info(outputStream *st, const void *context, int& continuation) {
++  static const char* const names[] = {
++    "G1", "G2", "G3", "G4", "G5", "G6", "G7",
++    "O0", "O1", "O2", "O3", "O4", "O5", "O6", "O7",
++    "L0", "L1", "L2", "L3", "L4", "L5", "L6", "L7",
++    "I0", "I1", "I2", "I3", "I4", "I5", "I6", "I7"
++  };
++  const int register_count = (int)ARRAY_SIZE(names);
++  int n = continuation;
++  assert(n >= 0 && n <= register_count, "Invalid continuation value");
++  if (context == nullptr || n == register_count) {
++    return;
++  }
+ 
+   const ucontext_t *uc = (const ucontext_t*)context;
+   const sigcontext* sc = (const sigcontext*)context;
+   intptr_t *sp = (intptr_t *)os::Linux::ucontext_get_sp(uc);
+ 
+-  st->print_cr("Register to memory mapping:");
+-  st->cr();
+-
+-  // this is only for the "general purpose" registers
+-  st->print("G1="); print_location(st, SIG_REGS(sc).u_regs[CON_G1]);
+-  st->print("G2="); print_location(st, SIG_REGS(sc).u_regs[CON_G2]);
+-  st->print("G3="); print_location(st, SIG_REGS(sc).u_regs[CON_G3]);
+-  st->print("G4="); print_location(st, SIG_REGS(sc).u_regs[CON_G4]);
+-  st->print("G5="); print_location(st, SIG_REGS(sc).u_regs[CON_G5]);
+-  st->print("G6="); print_location(st, SIG_REGS(sc).u_regs[CON_G6]);
+-  st->print("G7="); print_location(st, SIG_REGS(sc).u_regs[CON_G7]);
+-  st->cr();
+-
+-  st->print("O0="); print_location(st, SIG_REGS(sc).u_regs[CON_O0]);
+-  st->print("O1="); print_location(st, SIG_REGS(sc).u_regs[CON_O1]);
+-  st->print("O2="); print_location(st, SIG_REGS(sc).u_regs[CON_O2]);
+-  st->print("O3="); print_location(st, SIG_REGS(sc).u_regs[CON_O3]);
+-  st->print("O4="); print_location(st, SIG_REGS(sc).u_regs[CON_O4]);
+-  st->print("O5="); print_location(st, SIG_REGS(sc).u_regs[CON_O5]);
+-  st->print("O6="); print_location(st, SIG_REGS(sc).u_regs[CON_O6]);
+-  st->print("O7="); print_location(st, SIG_REGS(sc).u_regs[CON_O7]);
+-  st->cr();
+-
+-  st->print("L0="); print_location(st, sp[L0->sp_offset_in_saved_window()]);
+-  st->print("L1="); print_location(st, sp[L1->sp_offset_in_saved_window()]);
+-  st->print("L2="); print_location(st, sp[L2->sp_offset_in_saved_window()]);
+-  st->print("L3="); print_location(st, sp[L3->sp_offset_in_saved_window()]);
+-  st->print("L4="); print_location(st, sp[L4->sp_offset_in_saved_window()]);
+-  st->print("L5="); print_location(st, sp[L5->sp_offset_in_saved_window()]);
+-  st->print("L6="); print_location(st, sp[L6->sp_offset_in_saved_window()]);
+-  st->print("L7="); print_location(st, sp[L7->sp_offset_in_saved_window()]);
+-  st->cr();
+-
+-  st->print("I0="); print_location(st, sp[I0->sp_offset_in_saved_window()]);
+-  st->print("I1="); print_location(st, sp[I1->sp_offset_in_saved_window()]);
+-  st->print("I2="); print_location(st, sp[I2->sp_offset_in_saved_window()]);
+-  st->print("I3="); print_location(st, sp[I3->sp_offset_in_saved_window()]);
+-  st->print("I4="); print_location(st, sp[I4->sp_offset_in_saved_window()]);
+-  st->print("I5="); print_location(st, sp[I5->sp_offset_in_saved_window()]);
+-  st->print("I6="); print_location(st, sp[I6->sp_offset_in_saved_window()]);
+-  st->print("I7="); print_location(st, sp[I7->sp_offset_in_saved_window()]);
+-  st->cr();
++  while (n < register_count) {
++    // Update continuation with next index before printing location
++    continuation = n + 1;
++    intptr_t value;
++    if (n < 15) {
++      value = SIG_REGS(sc).u_regs[CON_G1 + n];
++    } else if (n < 23) {
++      value = sp[as_lRegister(n - 15)->sp_offset_in_saved_window()];
++    } else {
++      value = sp[as_iRegister(n - 23)->sp_offset_in_saved_window()];
++    }
++    st->print("%s=", names[n]);
++    print_location(st, value);
++    ++n;
++  }
+ }
+ 
+ 

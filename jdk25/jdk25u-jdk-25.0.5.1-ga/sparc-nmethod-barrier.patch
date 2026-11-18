@@ -1,0 +1,267 @@
+diff --git a/src/hotspot/cpu/sparc/c1_MacroAssembler_sparc.cpp b/src/hotspot/cpu/sparc/c1_MacroAssembler_sparc.cpp
+index 5cfb4d01e..0fe344235 100644
+--- a/src/hotspot/cpu/sparc/c1_MacroAssembler_sparc.cpp
++++ b/src/hotspot/cpu/sparc/c1_MacroAssembler_sparc.cpp
+@@ -26,6 +26,8 @@
+ #include "asm/macroAssembler.inline.hpp"
+ #include "c1/c1_MacroAssembler.hpp"
+ #include "c1/c1_Runtime1.hpp"
++#include "gc/shared/barrierSet.hpp"
++#include "gc/shared/barrierSetAssembler.hpp"
+ #include "gc/shared/collectedHeap.hpp"
+ #include "gc/shared/tlab_globals.hpp"
+ #include "interpreter/interpreter.hpp"
+@@ -46,6 +48,9 @@ void C1_MacroAssembler::build_frame(int frame_size_in_bytes, int bang_size_in_by
+   generate_stack_overflow_check(bang_size_in_bytes);
+   // Create the frame.
+   save_frame_c1(frame_size_in_bytes);
++
++  BarrierSetAssembler* bs = BarrierSet::barrier_set()->barrier_set_assembler();
++  bs->nmethod_entry_barrier(this);
+ }
+ 
+ 
+diff --git a/src/hotspot/cpu/sparc/gc/shared/barrierSetAssembler_sparc.cpp b/src/hotspot/cpu/sparc/gc/shared/barrierSetAssembler_sparc.cpp
+index ef217ab33..292991db4 100644
+--- a/src/hotspot/cpu/sparc/gc/shared/barrierSetAssembler_sparc.cpp
++++ b/src/hotspot/cpu/sparc/gc/shared/barrierSetAssembler_sparc.cpp
+@@ -24,9 +24,12 @@
+ 
+ #include "precompiled.hpp"
+ #include "asm/macroAssembler.inline.hpp"
++#include "gc/shared/barrierSet.hpp"
+ #include "gc/shared/barrierSetAssembler.hpp"
++#include "gc/shared/barrierSetNMethod.hpp"
+ #include "interpreter/interp_masm.hpp"
+ #include "runtime/jniHandles.hpp"
++#include "runtime/stubRoutines.hpp"
+ 
+ #define __ masm->
+ 
+@@ -107,6 +110,36 @@ void BarrierSetAssembler::try_resolve_jobject_in_native(MacroAssembler* masm, Re
+   __ ld_ptr(obj, 0, obj);
+ }
+ 
++// Emitted right after the frame is pushed, immediately before the frame
++// complete offset: the locals are free and the incoming arguments are still
++// in %i0-%i5 and F0-F7. The guard word is the last word of the barrier, see
++// barrierSetNMethod_sparc.cpp.
++void BarrierSetAssembler::nmethod_entry_barrier(MacroAssembler* masm) {
++  BarrierSetNMethod* bs_nm = BarrierSet::barrier_set()->barrier_set_nmethod();
++  if (bs_nm == nullptr) {
++    return;
++  }
++  assert(StubRoutines::method_entry_barrier() != nullptr, "must be generated before");
++
++  Label skip;
++  address start = __ pc();
++
++  __ rdpc(L0);
++  __ lduw(L0, 10 * BytesPerInstWord, L0);
++  __ ldx(G2_thread, in_bytes(bs_nm->thread_disarmed_guard_value_offset()), L1);   // uint64_t
++  __ cmp(L0, L1);
++  __ brx(Assembler::equal, false, Assembler::pt, skip);
++  __ delayed()->nop();
++  __ call(StubRoutines::method_entry_barrier(), relocInfo::runtime_call_type);
++  __ delayed()->nop();
++  __ br(Assembler::always, false, Assembler::pt, skip);
++  __ delayed()->nop();
++  __ emit_int32(0);   // guard value
++  __ bind(skip);
++
++  assert(__ pc() - start == 11 * BytesPerInstWord, "entry barrier size changed");
++}
++
+ #ifdef COMPILER2
+ 
+ OptoReg::Name BarrierSetAssembler::refine_register(const Node* node, OptoReg::Name opto_reg) {
+diff --git a/src/hotspot/cpu/sparc/gc/shared/barrierSetAssembler_sparc.hpp b/src/hotspot/cpu/sparc/gc/shared/barrierSetAssembler_sparc.hpp
+index 26708e6a1..15418862c 100644
+--- a/src/hotspot/cpu/sparc/gc/shared/barrierSetAssembler_sparc.hpp
++++ b/src/hotspot/cpu/sparc/gc/shared/barrierSetAssembler_sparc.hpp
+@@ -56,6 +56,8 @@ class BarrierSetAssembler: public CHeapObj<mtGC> {
+ 
+   virtual void barrier_stubs_init() {}
+ 
++  virtual void nmethod_entry_barrier(MacroAssembler* masm);
++
+ #ifdef COMPILER2
+   OptoReg::Name refine_register(const Node* node,
+                                 OptoReg::Name opto_reg);
+diff --git a/src/hotspot/cpu/sparc/gc/shared/barrierSetNMethod_sparc.cpp b/src/hotspot/cpu/sparc/gc/shared/barrierSetNMethod_sparc.cpp
+index 90f971a31..0ae1b6703 100644
+--- a/src/hotspot/cpu/sparc/gc/shared/barrierSetNMethod_sparc.cpp
++++ b/src/hotspot/cpu/sparc/gc/shared/barrierSetNMethod_sparc.cpp
+@@ -23,18 +23,39 @@
+  */
+ 
+ #include "precompiled.hpp"
++#include "code/nativeInst.hpp"
++#include "code/nmethod.hpp"
+ #include "gc/shared/barrierSetNMethod.hpp"
++#include "logging/log.hpp"
++#include "runtime/atomic.hpp"
+ #include "utilities/debug.hpp"
+ 
++// The constants below reflect the barrier in barrierSetAssembler_sparc.cpp.
++static const int entry_barrier_bytes = 11 * BytesPerInstWord;
++static const int entry_barrier_guard_offset = 10 * BytesPerInstWord;
++
++static int* guard_addr(nmethod* nm) {
++  address barrier = nm->code_begin() + nm->frame_complete_offset() - entry_barrier_bytes;
++  assert(Assembler::is_rdpc(*(int*)barrier), "entry barrier must start with rdpc");
++  return reinterpret_cast<int*>(barrier + entry_barrier_guard_offset);
++}
++
++// The method_entry_barrier stub unwinds the nmethod frame itself when the
++// barrier says the nmethod may not be entered.
+ void BarrierSetNMethod::deoptimize(nmethod* nm, address* return_address_ptr) {
+-  ShouldNotReachHere();
++  log_trace(nmethod, barrier)("deoptimize(nmethod: %p, return_addr: %p)", nm, *return_address_ptr);
+ }
+ 
+ void BarrierSetNMethod::set_guard_value(nmethod* nm, int value) {
+-  ShouldNotReachHere();
++  if (!supports_entry_barrier(nm)) {
++    return;
++  }
++  Atomic::release_store(guard_addr(nm), value);
+ }
+ 
+ int BarrierSetNMethod::guard_value(nmethod* nm) {
+-  ShouldNotReachHere();
+-  return -1;
++  if (!supports_entry_barrier(nm)) {
++    return disarmed_guard_value();
++  }
++  return Atomic::load_acquire(guard_addr(nm));
+ }
+diff --git a/src/hotspot/cpu/sparc/sharedRuntime_sparc.cpp b/src/hotspot/cpu/sparc/sharedRuntime_sparc.cpp
+index f087746a1..7817efd26 100644
+--- a/src/hotspot/cpu/sparc/sharedRuntime_sparc.cpp
++++ b/src/hotspot/cpu/sparc/sharedRuntime_sparc.cpp
+@@ -28,6 +28,8 @@
+ #include "code/compiledIC.hpp"
+ #include "code/vtableStubs.hpp"
+ #include "compiler/oopMap.hpp"
++#include "gc/shared/barrierSet.hpp"
++#include "gc/shared/barrierSetAssembler.hpp"
+ #include "gc/shared/gcLocker.hpp"
+ #include "interpreter/interpreter.hpp"
+ #include "logging/log.hpp"
+@@ -1764,6 +1766,9 @@ nmethod* SharedRuntime::generate_native_wrapper(MacroAssembler* masm,
+   // Generate a new frame for the wrapper.
+   __ save(SP, -stack_size, SP);
+ 
++  BarrierSetAssembler* bs = BarrierSet::barrier_set()->barrier_set_assembler();
++  bs->nmethod_entry_barrier(masm);
++
+   int frame_complete = ((intptr_t)__ pc()) - start;
+ 
+   __ verify_thread();
+diff --git a/src/hotspot/cpu/sparc/sparc.ad b/src/hotspot/cpu/sparc/sparc.ad
+index e9074509f..2f3c4a909 100644
+--- a/src/hotspot/cpu/sparc/sparc.ad
++++ b/src/hotspot/cpu/sparc/sparc.ad
+@@ -425,6 +425,8 @@ source_hpp %{
+ // To keep related declarations/definitions/uses close together,
+ // we switch between source %{ }% and source_hpp %{ }% freely as needed.
+ 
++#include "gc/shared/barrierSet.hpp"
++#include "gc/shared/barrierSetAssembler.hpp"
+ #include "oops/klass.inline.hpp"
+ 
+ // Must be visible to the DFA in dfa_sparc.cpp
+@@ -1086,6 +1088,12 @@ void MachPrologNode::emit(C2_MacroAssembler *masm, PhaseRegAlloc *ra_) const {
+     __ add(G3, -framesize & 0x3ff, G3);
+     __ save(SP, G3, SP);
+   }
++
++  if (C->stub_function() == nullptr) {
++    BarrierSetAssembler* bs = BarrierSet::barrier_set()->barrier_set_assembler();
++    bs->nmethod_entry_barrier(masm);
++  }
++
+   C->output()->set_frame_complete( __ offset() );
+ 
+   if (C->has_mach_constant_base_node()) {
+diff --git a/src/hotspot/cpu/sparc/stubGenerator_sparc.cpp b/src/hotspot/cpu/sparc/stubGenerator_sparc.cpp
+index 9b024b785..3623db432 100644
+--- a/src/hotspot/cpu/sparc/stubGenerator_sparc.cpp
++++ b/src/hotspot/cpu/sparc/stubGenerator_sparc.cpp
+@@ -26,6 +26,7 @@
+ #include "asm/macroAssembler.inline.hpp"
+ #include "gc/shared/barrierSet.hpp"
+ #include "gc/shared/barrierSetAssembler.hpp"
++#include "gc/shared/barrierSetNMethod.hpp"
+ #include "interpreter/interpreter.hpp"
+ #include "nativeInst_sparc.hpp"
+ #include "oops/instanceOop.hpp"
+@@ -5666,9 +5667,51 @@ class StubGenerator: public StubCodeGenerator {
+   }
+ 
+ 
++  // Called from the nmethod entry barrier in the nmethod's freshly pushed
++  // window. When the nmethod may not be entered, drop its frame and redo the
++  // call through the handle_wrong_method stub, as for a not entrant nmethod.
++  address generate_method_entry_barrier() {
++    StubCodeMark mark(this, "StubRoutines", "nmethod_entry_barrier");
++    address start = __ pc();
++
++    const int ret_slot = frame::memory_parameter_word_sp_offset;
++    const int fp_slot  = ret_slot + 1;
++    const int frame_words = align_up(fp_slot + 4, 2);
++
++    __ save(SP, -frame_words * wordSize, SP);
++    for (int i = 0; i < 4; i++) {
++      __ stf(FloatRegisterImpl::D, as_FloatRegister(2 * i), SP, STACK_BIAS + (fp_slot + i) * wordSize);
++    }
++    __ stx(I7, SP, STACK_BIAS + ret_slot * wordSize);
++    __ add(SP, STACK_BIAS + ret_slot * wordSize, O0);
++    __ call_VM_leaf(L7_thread_cache, CAST_FROM_FN_PTR(address, BarrierSetNMethod::nmethod_stub_entry_barrier), O0);
++    for (int i = 0; i < 4; i++) {
++      __ ldf(FloatRegisterImpl::D, SP, STACK_BIAS + (fp_slot + i) * wordSize, as_FloatRegister(2 * i));
++    }
++
++    Label deoptimize;
++    __ br_notnull_short(O0, Assembler::pn, deoptimize);
++    __ ret();
++    __ delayed()->restore();
++
++    __ bind(deoptimize);
++    __ restore();
++    __ restore();
++    AddressLiteral wrong_method(SharedRuntime::get_handle_wrong_method_stub());
++    __ jump_to(wrong_method, G3_scratch);
++    __ delayed()->nop();
++
++    return start;
++  }
++
+   void generate_all() {
+     // Generates all stubs and initializes the entry points
+ 
++    BarrierSetNMethod* bs_nm = BarrierSet::barrier_set()->barrier_set_nmethod();
++    if (bs_nm != nullptr) {
++      StubRoutines::_method_entry_barrier = generate_method_entry_barrier();
++    }
++
+     // Generate partial_subtype_check first here since its code depends on
+     // UseZeroBaseCompressedOops which is defined after heap initialization.
+     StubRoutines::Sparc::_partial_subtype_check                = generate_partial_subtype_check();
+diff --git a/src/hotspot/share/gc/shared/barrierSet.cpp b/src/hotspot/share/gc/shared/barrierSet.cpp
+index d66377ab0..c3a0c9cbb 100644
+--- a/src/hotspot/share/gc/shared/barrierSet.cpp
++++ b/src/hotspot/share/gc/shared/barrierSet.cpp
+@@ -59,11 +59,7 @@ static BarrierSetNMethod* select_barrier_set_nmethod(BarrierSetNMethod* barrier_
+   } else {
+     // The GC needs nmethod entry barriers to deal with continuations
+     // and code cache unloading
+-#ifdef SPARC
+-    return nullptr;
+-#else
+     return new BarrierSetNMethod();
+-#endif
+   }
+ }
+ 

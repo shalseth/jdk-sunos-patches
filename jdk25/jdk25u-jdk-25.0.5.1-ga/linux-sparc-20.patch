@@ -1,0 +1,595 @@
+diff --git a/src/hotspot/os_cpu/linux_sparc/javaThread_linux_sparc.cpp b/src/hotspot/os_cpu/linux_sparc/javaThread_linux_sparc.cpp
+new file mode 100644
+index 000000000..176cfac12
+--- /dev/null
++++ b/src/hotspot/os_cpu/linux_sparc/javaThread_linux_sparc.cpp
+@@ -0,0 +1,126 @@
++/*
++ * Copyright (c) 2003, 2018, Oracle and/or its affiliates. All rights reserved.
++ * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
++ *
++ * This code is free software; you can redistribute it and/or modify it
++ * under the terms of the GNU General Public License version 2 only, as
++ * published by the Free Software Foundation.
++ *
++ * This code is distributed in the hope that it will be useful, but WITHOUT
++ * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
++ * FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
++ * version 2 for more details (a copy is included in the LICENSE file that
++ * accompanied this code).
++ *
++ * You should have received a copy of the GNU General Public License version
++ * 2 along with this work; if not, write to the Free Software Foundation,
++ * Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301 USA.
++ *
++ * Please contact Oracle, 500 Oracle Parkway, Redwood Shores, CA 94065 USA
++ * or visit www.oracle.com if you need additional information or have any
++ * questions.
++ *
++ */
++
++#include "precompiled.hpp"
++#include "runtime/frame.inline.hpp"
++#include "runtime/javaThread.inline.hpp"
++
++frame JavaThread::pd_last_frame() {
++  assert(has_last_Java_frame(), "must have last_Java_sp() when suspended");
++  assert(_anchor.walkable(), "thread has not dumped its register windows yet");
++
++  assert(_anchor.last_Java_pc() != NULL, "Ack no pc!");
++  return frame(last_Java_sp(), frame::unpatchable, _anchor.last_Java_pc());
++}
++
++bool JavaThread::pd_get_top_frame_for_profiling(frame* fr_addr, void* ucontext, bool isInJava) {
++  ucontext_t* uc = (ucontext_t*) ucontext;
++  *fr_addr = frame((intptr_t*)uc->uc_mcontext.mc_i7, frame::unpatchable,
++                   (address)uc->uc_mcontext.mc_gregs[MC_PC]);
++  return true;
++}
++
++// For Forte Analyzer AsyncGetCallTrace profiling support - thread is
++// currently interrupted by SIGPROF
++bool JavaThread::pd_get_top_frame_for_signal_handler(frame* fr_addr,
++                                                     void* ucontext,
++                                                     bool isInJava) {
++  assert(Thread::current() == this, "caller must be current thread");
++  assert(this->is_Java_thread(), "must be JavaThread");
++
++  JavaThread* jt = (JavaThread *)this;
++
++  if (!isInJava) {
++    // make_walkable flushes register windows and grabs last_Java_pc
++    // which can not be done if the ucontext sp matches last_Java_sp
++    // stack walking utilities assume last_Java_pc set if marked flushed
++    jt->frame_anchor()->make_walkable();
++  }
++
++  // If we have a walkable last_Java_frame, then we should use it
++  // even if isInJava == true. It should be more reliable than
++  // ucontext info.
++  if (jt->has_last_Java_frame() && jt->frame_anchor()->walkable()) {
++    *fr_addr = jt->pd_last_frame();
++    return true;
++  }
++
++  ucontext_t* uc = (ucontext_t*) ucontext;
++
++  // At this point, we don't have a walkable last_Java_frame, so
++  // we try to glean some information out of the ucontext.
++  intptr_t* ret_sp;
++  address addr =
++    os::fetch_frame_from_context(uc, &ret_sp,
++                                 NULL /* ret_fp only used on X86 */);
++  if (addr == NULL || ret_sp == NULL) {
++    // ucontext wasn't useful
++    return false;
++  }
++
++  // we were running Java code when SIGPROF came in
++  if (isInJava) {
++    // If we have a last_Java_sp, then the SIGPROF signal caught us
++    // right when we were transitioning from _thread_in_Java to a new
++    // JavaThreadState. We use last_Java_sp instead of the sp from
++    // the ucontext since it should be more reliable.
++    if (jt->has_last_Java_frame()) {
++      ret_sp = jt->last_Java_sp();
++    }
++    // Implied else: we don't have a last_Java_sp so we use what we
++    // got from the ucontext.
++
++    frame ret_frame(ret_sp, frame::unpatchable, addr);
++    if (!ret_frame.safe_for_sender(jt)) {
++      // nothing else to try if the frame isn't good
++      return false;
++    }
++    *fr_addr = ret_frame;
++    return true;
++  }
++
++  // At this point, we know we weren't running Java code. We might
++  // have a last_Java_sp, but we don't have a walkable frame.
++  // However, we might still be able to construct something useful
++  // if the thread was running native code.
++  if (jt->has_last_Java_frame()) {
++    assert(!jt->frame_anchor()->walkable(), "case covered above");
++
++    if (jt->thread_state() == _thread_in_native) {
++      frame ret_frame(jt->last_Java_sp(), frame::unpatchable, addr);
++      if (!ret_frame.safe_for_sender(jt)) {
++        // nothing else to try if the frame isn't good
++        return false;
++      }
++      *fr_addr = ret_frame;
++      return true;
++    }
++  }
++
++  // nothing else to try
++  return false;
++}
++
++void JavaThread::cache_global_variables() { }
++
+diff --git a/src/hotspot/os_cpu/linux_sparc/javaThread_linux_sparc.hpp b/src/hotspot/os_cpu/linux_sparc/javaThread_linux_sparc.hpp
+new file mode 100644
+index 000000000..d07110dca
+--- /dev/null
++++ b/src/hotspot/os_cpu/linux_sparc/javaThread_linux_sparc.hpp
+@@ -0,0 +1,83 @@
++/*
++ * Copyright (c) 1998, 2019, Oracle and/or its affiliates. All rights reserved.
++ * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
++ *
++ * This code is free software; you can redistribute it and/or modify it
++ * under the terms of the GNU General Public License version 2 only, as
++ * published by the Free Software Foundation.
++ *
++ * This code is distributed in the hope that it will be useful, but WITHOUT
++ * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
++ * FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
++ * version 2 for more details (a copy is included in the LICENSE file that
++ * accompanied this code).
++ *
++ * You should have received a copy of the GNU General Public License version
++ * 2 along with this work; if not, write to the Free Software Foundation,
++ * Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301 USA.
++ *
++ * Please contact Oracle, 500 Oracle Parkway, Redwood Shores, CA 94065 USA
++ * or visit www.oracle.com if you need additional information or have any
++ * questions.
++ *
++ */
++
++#ifndef OS_CPU_LINUX_SPARC_JAVATHREAD_LINUX_SPARC_HPP
++#define OS_CPU_LINUX_SPARC_JAVATHREAD_LINUX_SPARC_HPP
++
++private:
++
++  void pd_initialize() {
++    _anchor.clear();
++    _base_of_stack_pointer        = NULL;
++  }
++
++  frame pd_last_frame();
++
++  // Sometimes the trap handler needs to record both PC and NPC.
++  // This is a SPARC-specific companion to Thread::set_saved_exception_pc.
++  address _saved_exception_npc;
++
++  // In polling_page_safepoint_handler_blob(s) we have to tail call other
++  // blobs without blowing any registers.  A tail call requires some
++  // register to jump with and we can't blow any registers, so it must
++  // be restored in the delay slot.  'restore' cannot be used as it
++  // will chop the heads off of 64-bit %o registers in the 32-bit
++  // build.  Instead we reload the registers using G2_thread and this
++  // location.  Must be 64bits in the 32-bit LION build.
++  jdouble _o_reg_temps[6];
++
++  // a stack pointer older than any java frame stack pointer.  It is
++  // used to validate stack pointers in frame::next_younger_sp (it
++  // provides the upper bound in the range check).  This is necessary
++  // on Solaris/SPARC since the ucontext passed to a signal handler is
++  // sometimes corrupt and we need a way to check the extracted sp.
++  intptr_t* _base_of_stack_pointer;
++
++public:
++
++  static int o_reg_temps_offset_in_bytes() { return offset_of(JavaThread, _o_reg_temps); }
++
++#ifndef _LP64
++  address o_reg_temps(int i) { return (address)&_o_reg_temps[i]; }
++#endif
++
++  static ByteSize saved_exception_npc_offset() { return byte_offset_of(JavaThread,_saved_exception_npc); }
++
++  address  saved_exception_npc()             { return _saved_exception_npc; }
++  void set_saved_exception_npc(address a)    { _saved_exception_npc = a; }
++
++
++public:
++
++  intptr_t* base_of_stack_pointer() { return _base_of_stack_pointer; }
++
++  void set_base_of_stack_pointer(intptr_t* base_sp) {
++    _base_of_stack_pointer = base_sp;
++  }
++
++  bool pd_get_top_frame_for_signal_handler(frame* fr_addr, void* ucontext, bool isInJava);
++
++  bool pd_get_top_frame_for_profiling(frame* fr_addr, void* ucontext, bool isInJava);
++
++#endif // OS_CPU_LINUX_SPARC_JAVATHREAD_LINUX_SPARC_HPP
+diff --git a/src/hotspot/os_cpu/linux_sparc/os_linux_sparc.cpp b/src/hotspot/os_cpu/linux_sparc/os_linux_sparc.cpp
+index cdcdd562b..a3f0f0a04 100644
+--- a/src/hotspot/os_cpu/linux_sparc/os_linux_sparc.cpp
++++ b/src/hotspot/os_cpu/linux_sparc/os_linux_sparc.cpp
+@@ -34,7 +34,8 @@
+ #include "interpreter/interpreter.hpp"
+ #include "memory/allocation.inline.hpp"
+ #include "nativeInst_sparc.hpp"
+-#include "os_share_linux.hpp"
++#include "os_linux.hpp"
++#include "os_posix.hpp"
+ #include "prims/jniFastGetField.hpp"
+ #include "prims/jvm_misc.hpp"
+ #include "runtime/arguments.hpp"
+@@ -47,7 +48,7 @@
+ #include "runtime/safepointMechanism.hpp"
+ #include "runtime/sharedRuntime.hpp"
+ #include "runtime/stubRoutines.hpp"
+-#include "runtime/thread.inline.hpp"
++#include "runtime/javaThread.hpp"
+ #include "runtime/timer.hpp"
+ #include "signals_posix.hpp"
+ #include "utilities/debug.hpp"
+@@ -228,9 +229,8 @@ void os::print_tos_pc(outputStream *st, const void *context) {
+ 
+   const ucontext_t* uc = (const ucontext_t*)context;
+ 
+-  intptr_t *sp = (intptr_t *)os::Linux::ucontext_get_sp(uc);
+-  st->print_cr("Top of Stack: (sp=" PTR_FORMAT ")", p2i(sp));
+-  print_hex_dump(st, (address)sp, (address)(sp + 32), sizeof(intptr_t));
++  address sp = (address)os::Linux::ucontext_get_sp(uc);
++  print_tos(st, sp);
+   st->cr();
+ 
+   // Note: it may be unsafe to inspect memory near pc. For example, pc may
+@@ -329,7 +329,7 @@ inline static bool checkByteBuffer(address pc, address npc, JavaThread * thread,
+   // BugId 4454115: A read from a MappedByteBuffer can fault
+   // here if the underlying file has been truncated.
+   // Do not crash the VM in such a case.
+-  CodeBlob* cb = CodeCache::find_blob_unsafe(pc);
++  CodeBlob* cb = CodeCache::find_blob(pc);
+   CompiledMethod* nm = cb->as_compiled_method_or_null();
+   bool is_unsafe_arraycopy = (thread->doing_unsafe_access() && UnsafeCopyMemory::contains_pc(pc));
+   if ((nm != NULL && nm->has_unsafe_access()) || is_unsafe_arraycopy) {
+@@ -407,7 +407,7 @@ inline static bool checkICMiss(sigcontext* uc, address* pc, address* stub) {
+   if (nativeInstruction_at(*pc)->is_ic_miss_trap()) {
+ #ifdef ASSERT
+   #if COMPILER1_AND_COMPILER2
+-    CodeBlob* cb = CodeCache::find_blob_unsafe(*pc);
++    CodeBlob* cb = CodeCache::find_blob(*pc);
+     assert(cb->is_compiled_by_c2(), "Wrong compiler");
+   #endif // COMPILER1_AND_COMPILER2
+ #endif // ASSERT
+@@ -525,9 +525,7 @@ void os::Linux::set_fpu_control_word(int fpu) {
+   // nothing
+ }
+ 
+-bool os::is_allocatable(size_t bytes) {
+-  return true;
+-}
++void os::setup_fpu() {}
+ 
+ ///////////////////////////////////////////////////////////////////////////////
+ // thread stack
+diff --git a/src/hotspot/os_cpu/linux_sparc/os_linux_sparc.hpp b/src/hotspot/os_cpu/linux_sparc/os_linux_sparc.hpp
+deleted file mode 100644
+index df6fc0b8e..000000000
+--- a/src/hotspot/os_cpu/linux_sparc/os_linux_sparc.hpp
++++ /dev/null
+@@ -1,49 +0,0 @@
+-/*
+- * Copyright (c) 1999, 2019, Oracle and/or its affiliates. All rights reserved.
+- * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+- *
+- * This code is free software; you can redistribute it and/or modify it
+- * under the terms of the GNU General Public License version 2 only, as
+- * published by the Free Software Foundation.
+- *
+- * This code is distributed in the hope that it will be useful, but WITHOUT
+- * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+- * FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+- * version 2 for more details (a copy is included in the LICENSE file that
+- * accompanied this code).
+- *
+- * You should have received a copy of the GNU General Public License version
+- * 2 along with this work; if not, write to the Free Software Foundation,
+- * Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301 USA.
+- *
+- * Please contact Oracle, 500 Oracle Parkway, Redwood Shores, CA 94065 USA
+- * or visit www.oracle.com if you need additional information or have any
+- * questions.
+- *
+- */
+-
+-#ifndef OS_CPU_LINUX_SPARC_OS_LINUX_SPARC_HPP
+-#define OS_CPU_LINUX_SPARC_OS_LINUX_SPARC_HPP
+-
+-  //
+-  // NOTE: we are back in class os here, not Linux
+-  //
+-  static int32_t  (*atomic_xchg_func)        (int32_t,  volatile int32_t*);
+-  static int32_t  (*atomic_cmpxchg_func)     (int32_t,  volatile int32_t*, int32_t);
+-  static int64_t  (*atomic_cmpxchg_long_func)(int64_t,  volatile int64_t*, int64_t);
+-  static int32_t  (*atomic_add_func)         (int32_t,  volatile int32_t*);
+-
+-  static int32_t  atomic_xchg_bootstrap        (int32_t,  volatile int32_t*);
+-  static int32_t  atomic_cmpxchg_bootstrap     (int32_t,  volatile int32_t*, int32_t);
+-  static int64_t  atomic_cmpxchg_long_bootstrap(int64_t,  volatile int64_t*, int64_t);
+-  static int32_t  atomic_add_bootstrap         (int32_t,  volatile int32_t*);
+-
+-  static void setup_fpu() {}
+-
+-  static bool is_allocatable(size_t bytes);
+-
+-  // Used to register dynamic code cache area with the OS
+-  // Note: Currently only used in 64 bit Windows implementations
+-  static bool register_code_area(char *low, char *high) { return true; }
+-
+-#endif // OS_CPU_LINUX_SPARC_OS_LINUX_SPARC_HPP
+diff --git a/src/hotspot/os_cpu/linux_sparc/os_linux_sparc.inline.hpp b/src/hotspot/os_cpu/linux_sparc/os_linux_sparc.inline.hpp
+new file mode 100644
+index 000000000..d27b81758
+--- /dev/null
++++ b/src/hotspot/os_cpu/linux_sparc/os_linux_sparc.inline.hpp
+@@ -0,0 +1,28 @@
++/*
++ * Copyright (c) 1999, 2019, Oracle and/or its affiliates. All rights reserved.
++ * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
++ *
++ * This code is free software; you can redistribute it and/or modify it
++ * under the terms of the GNU General Public License version 2 only, as
++ * published by the Free Software Foundation.
++ *
++ * This code is distributed in the hope that it will be useful, but WITHOUT
++ * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
++ * FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
++ * version 2 for more details (a copy is included in the LICENSE file that
++ * accompanied this code).
++ *
++ * You should have received a copy of the GNU General Public License version
++ * 2 along with this work; if not, write to the Free Software Foundation,
++ * Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301 USA.
++ *
++ * Please contact Oracle, 500 Oracle Parkway, Redwood Shores, CA 94065 USA
++ * or visit www.oracle.com if you need additional information or have any
++ * questions.
++ *
++ */
++
++#ifndef OS_CPU_LINUX_SPARC_OS_LINUX_SPARC_INLINE_HPP
++#define OS_CPU_LINUX_SPARC_OS_LINUX_SPARC_INLINE_HPP
++
++#endif // OS_CPU_LINUX_SPARC_OS_LINUX_SPARC_INLINE_HPP
+diff --git a/src/hotspot/os_cpu/linux_sparc/thread_linux_sparc.cpp b/src/hotspot/os_cpu/linux_sparc/thread_linux_sparc.cpp
+deleted file mode 100644
+index 2825d4d57..000000000
+--- a/src/hotspot/os_cpu/linux_sparc/thread_linux_sparc.cpp
++++ /dev/null
+@@ -1,126 +0,0 @@
+-/*
+- * Copyright (c) 2003, 2018, Oracle and/or its affiliates. All rights reserved.
+- * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+- *
+- * This code is free software; you can redistribute it and/or modify it
+- * under the terms of the GNU General Public License version 2 only, as
+- * published by the Free Software Foundation.
+- *
+- * This code is distributed in the hope that it will be useful, but WITHOUT
+- * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+- * FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+- * version 2 for more details (a copy is included in the LICENSE file that
+- * accompanied this code).
+- *
+- * You should have received a copy of the GNU General Public License version
+- * 2 along with this work; if not, write to the Free Software Foundation,
+- * Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301 USA.
+- *
+- * Please contact Oracle, 500 Oracle Parkway, Redwood Shores, CA 94065 USA
+- * or visit www.oracle.com if you need additional information or have any
+- * questions.
+- *
+- */
+-
+-#include "precompiled.hpp"
+-#include "runtime/frame.inline.hpp"
+-#include "runtime/thread.inline.hpp"
+-
+-frame JavaThread::pd_last_frame() {
+-  assert(has_last_Java_frame(), "must have last_Java_sp() when suspended");
+-  assert(_anchor.walkable(), "thread has not dumped its register windows yet");
+-
+-  assert(_anchor.last_Java_pc() != NULL, "Ack no pc!");
+-  return frame(last_Java_sp(), frame::unpatchable, _anchor.last_Java_pc());
+-}
+-
+-bool JavaThread::pd_get_top_frame_for_profiling(frame* fr_addr, void* ucontext, bool isInJava) {
+-  ucontext_t* uc = (ucontext_t*) ucontext;
+-  *fr_addr = frame((intptr_t*)uc->uc_mcontext.mc_i7, frame::unpatchable,
+-                   (address)uc->uc_mcontext.mc_gregs[MC_PC]);
+-  return true;
+-}
+-
+-// For Forte Analyzer AsyncGetCallTrace profiling support - thread is
+-// currently interrupted by SIGPROF
+-bool JavaThread::pd_get_top_frame_for_signal_handler(frame* fr_addr,
+-                                                     void* ucontext,
+-                                                     bool isInJava) {
+-  assert(Thread::current() == this, "caller must be current thread");
+-  assert(this->is_Java_thread(), "must be JavaThread");
+-
+-  JavaThread* jt = (JavaThread *)this;
+-
+-  if (!isInJava) {
+-    // make_walkable flushes register windows and grabs last_Java_pc
+-    // which can not be done if the ucontext sp matches last_Java_sp
+-    // stack walking utilities assume last_Java_pc set if marked flushed
+-    jt->frame_anchor()->make_walkable();
+-  }
+-
+-  // If we have a walkable last_Java_frame, then we should use it
+-  // even if isInJava == true. It should be more reliable than
+-  // ucontext info.
+-  if (jt->has_last_Java_frame() && jt->frame_anchor()->walkable()) {
+-    *fr_addr = jt->pd_last_frame();
+-    return true;
+-  }
+-
+-  ucontext_t* uc = (ucontext_t*) ucontext;
+-
+-  // At this point, we don't have a walkable last_Java_frame, so
+-  // we try to glean some information out of the ucontext.
+-  intptr_t* ret_sp;
+-  address addr =
+-    os::fetch_frame_from_context(uc, &ret_sp,
+-                                 NULL /* ret_fp only used on X86 */);
+-  if (addr == NULL || ret_sp == NULL) {
+-    // ucontext wasn't useful
+-    return false;
+-  }
+-
+-  // we were running Java code when SIGPROF came in
+-  if (isInJava) {
+-    // If we have a last_Java_sp, then the SIGPROF signal caught us
+-    // right when we were transitioning from _thread_in_Java to a new
+-    // JavaThreadState. We use last_Java_sp instead of the sp from
+-    // the ucontext since it should be more reliable.
+-    if (jt->has_last_Java_frame()) {
+-      ret_sp = jt->last_Java_sp();
+-    }
+-    // Implied else: we don't have a last_Java_sp so we use what we
+-    // got from the ucontext.
+-
+-    frame ret_frame(ret_sp, frame::unpatchable, addr);
+-    if (!ret_frame.safe_for_sender(jt)) {
+-      // nothing else to try if the frame isn't good
+-      return false;
+-    }
+-    *fr_addr = ret_frame;
+-    return true;
+-  }
+-
+-  // At this point, we know we weren't running Java code. We might
+-  // have a last_Java_sp, but we don't have a walkable frame.
+-  // However, we might still be able to construct something useful
+-  // if the thread was running native code.
+-  if (jt->has_last_Java_frame()) {
+-    assert(!jt->frame_anchor()->walkable(), "case covered above");
+-
+-    if (jt->thread_state() == _thread_in_native) {
+-      frame ret_frame(jt->last_Java_sp(), frame::unpatchable, addr);
+-      if (!ret_frame.safe_for_sender(jt)) {
+-        // nothing else to try if the frame isn't good
+-        return false;
+-      }
+-      *fr_addr = ret_frame;
+-      return true;
+-    }
+-  }
+-
+-  // nothing else to try
+-  return false;
+-}
+-
+-void JavaThread::cache_global_variables() { }
+-
+diff --git a/src/hotspot/os_cpu/linux_sparc/thread_linux_sparc.hpp b/src/hotspot/os_cpu/linux_sparc/thread_linux_sparc.hpp
+deleted file mode 100644
+index 25e3e904e..000000000
+--- a/src/hotspot/os_cpu/linux_sparc/thread_linux_sparc.hpp
++++ /dev/null
+@@ -1,83 +0,0 @@
+-/*
+- * Copyright (c) 1998, 2019, Oracle and/or its affiliates. All rights reserved.
+- * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+- *
+- * This code is free software; you can redistribute it and/or modify it
+- * under the terms of the GNU General Public License version 2 only, as
+- * published by the Free Software Foundation.
+- *
+- * This code is distributed in the hope that it will be useful, but WITHOUT
+- * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+- * FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+- * version 2 for more details (a copy is included in the LICENSE file that
+- * accompanied this code).
+- *
+- * You should have received a copy of the GNU General Public License version
+- * 2 along with this work; if not, write to the Free Software Foundation,
+- * Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301 USA.
+- *
+- * Please contact Oracle, 500 Oracle Parkway, Redwood Shores, CA 94065 USA
+- * or visit www.oracle.com if you need additional information or have any
+- * questions.
+- *
+- */
+-
+-#ifndef OS_CPU_LINUX_SPARC_THREAD_LINUX_SPARC_HPP
+-#define OS_CPU_LINUX_SPARC_THREAD_LINUX_SPARC_HPP
+-
+-private:
+-
+-  void pd_initialize() {
+-    _anchor.clear();
+-    _base_of_stack_pointer        = NULL;
+-  }
+-
+-  frame pd_last_frame();
+-
+-  // Sometimes the trap handler needs to record both PC and NPC.
+-  // This is a SPARC-specific companion to Thread::set_saved_exception_pc.
+-  address _saved_exception_npc;
+-
+-  // In polling_page_safepoint_handler_blob(s) we have to tail call other
+-  // blobs without blowing any registers.  A tail call requires some
+-  // register to jump with and we can't blow any registers, so it must
+-  // be restored in the delay slot.  'restore' cannot be used as it
+-  // will chop the heads off of 64-bit %o registers in the 32-bit
+-  // build.  Instead we reload the registers using G2_thread and this
+-  // location.  Must be 64bits in the 32-bit LION build.
+-  jdouble _o_reg_temps[6];
+-
+-  // a stack pointer older than any java frame stack pointer.  It is
+-  // used to validate stack pointers in frame::next_younger_sp (it
+-  // provides the upper bound in the range check).  This is necessary
+-  // on Solaris/SPARC since the ucontext passed to a signal handler is
+-  // sometimes corrupt and we need a way to check the extracted sp.
+-  intptr_t* _base_of_stack_pointer;
+-
+-public:
+-
+-  static int o_reg_temps_offset_in_bytes() { return offset_of(JavaThread, _o_reg_temps); }
+-
+-#ifndef _LP64
+-  address o_reg_temps(int i) { return (address)&_o_reg_temps[i]; }
+-#endif
+-
+-  static ByteSize saved_exception_npc_offset() { return byte_offset_of(JavaThread,_saved_exception_npc); }
+-
+-  address  saved_exception_npc()             { return _saved_exception_npc; }
+-  void set_saved_exception_npc(address a)    { _saved_exception_npc = a; }
+-
+-
+-public:
+-
+-  intptr_t* base_of_stack_pointer() { return _base_of_stack_pointer; }
+-
+-  void set_base_of_stack_pointer(intptr_t* base_sp) {
+-    _base_of_stack_pointer = base_sp;
+-  }
+-
+-  bool pd_get_top_frame_for_signal_handler(frame* fr_addr, void* ucontext, bool isInJava);
+-
+-  bool pd_get_top_frame_for_profiling(frame* fr_addr, void* ucontext, bool isInJava);
+-
+-#endif // OS_CPU_LINUX_SPARC_THREAD_LINUX_SPARC_HPP
