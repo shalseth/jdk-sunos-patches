@@ -23,3 +23,4 @@
 -p1 jdk25u-jdk-25.0.5.1-ga/sparc-nmethod-barrier.patch
 -p1 jdk25u-jdk-25.0.5.1-ga/sparc-24.patch
 -p1 jdk25u-jdk-25.0.5.1-ga/sparc-25.patch
+-p1 jdk25u-jdk-25.0.5.1-ga/sparc-nopch-includes.patch
